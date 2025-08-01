@@ -216,6 +216,11 @@ async def remove_unsubscribed_users(context: ContextTypes.DEFAULT_TYPE):
 async def forward_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     msg = update.message
+
+    # 不监听目标群组消息，避免重复转发或循环转发
+    if chat.id == TARGET_GROUP:
+        return
+
     if chat.type not in ["group", "supergroup", "channel"]:
         return
     text = msg.text or ""
