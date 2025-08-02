@@ -192,18 +192,17 @@ async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.delete()
     except Exception as e:
         print(f"[删除加入消息] 失败: {e}")
-        
+
     for member in update.message.new_chat_members:
         user_id = member.id
         subscribed = await check_user_subscribed(app, user_id)
         if subscribed:
             print(f"[欢迎] 用户 {user_id} 已关注频道和群组")
         else:
-            await update.message.reply_text(
-                f"👋 欢迎 {member.full_name}！请先关注频道 https://t.me/VEXEGX 和群组 https://t.me/VEXECN ，"
-                "否则24小时后将被移出本群。"
+            await context.bot.send_message(
+                chat_id=TARGET_GROUP,
+                text=f"👋 欢迎 {member.full_name}！请先关注频道 https://t.me/VEXEGX 和群组 https://t.me/VEXECN ，否则24小时后将被移出本群。"
             )
-            # 记录待检查的用户
             pending_users[user_id] = datetime.utcnow()
             save_pending_users()
 
