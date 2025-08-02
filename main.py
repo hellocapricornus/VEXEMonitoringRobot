@@ -187,6 +187,12 @@ async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     app = context.application
+    # 删除 Telegram 自动生成的“加入群组”消息
+    try:
+        await update.message.delete()
+    except Exception as e:
+        print(f"[删除加入消息] 失败: {e}")
+        
     for member in update.message.new_chat_members:
         user_id = member.id
         subscribed = await check_user_subscribed(app, user_id)
@@ -197,6 +203,12 @@ async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"👋 欢迎 {member.full_name}！请先关注频道 https://t.me/VEXEGX 和群组 https://t.me/VEXECN ，"
                 "否则24小时后将被移出本群。"
             )
+            # 8 秒后自动删除提醒
+            context.job_queue.run_once(
+                lambda ctx: ctx.bot.delete_message(reminder.chat_id, reminder.message_id),
+                when=8
+            )
+            # 记录待检查的用户
             pending_users[user_id] = datetime.utcnow()
             save_pending_users()
 
