@@ -181,6 +181,11 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ========== 新成员加入检查 ==========
 async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+# 只针对目标群
+    if update.effective_chat.id != TARGET_GROUP:
+        return
+
     app = context.application
     for member in update.message.new_chat_members:
         user_id = member.id
