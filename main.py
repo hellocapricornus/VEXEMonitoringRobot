@@ -2,8 +2,8 @@ import json
 import os
 from datetime import datetime, timedelta
 import pytz
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, ChatMember
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters, ChatMemberHandler
 
 # ========== 配置 ==========
 BOT_TOKEN = "8281720118:AAFBTiE2NHqeYJ5L4o53GPuFFDbEJMDlrpY"
@@ -81,13 +81,15 @@ async def handle_user_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.id != TARGET_GROUP:
         return
 
-    # 删除 Telegram 自动生成的“退出群组”消息
-    try:
-        if update.message:
+    # 如果是用户退出群组，尝试删除退出消息
+    if update.chat_member and update.chat_member.status == ChatMember.Status.LEFT:
+        user_id = update.chat_member.user.id
+        try:
+            # 尝试删除退出群组的消息（会被视作系统消息）
             await update.message.delete()
-            print(f"[删除退出消息] 用户 {update.message.from_user.id} 退出群组，已删除自动生成的消息")
-    except Exception as e:
-        print(f"[删除退出消息] 失败: {e}")
+            print(f"[删除退出消息] 用户 {user_id} 退出群组，已删除自动生成的消息")
+        except Exception as e:
+            print(f"[删除退出消息] 失败: {e}")
         
 # ========== 群组事件处理 ==========
 async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
