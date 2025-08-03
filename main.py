@@ -75,6 +75,20 @@ async def check_user_subscribed(app, user_id) -> bool:
     """检测用户是否是会员"""
     return user_id in members
 
+# 监听用户退出群组的事件
+async def handle_user_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """处理用户退出群组"""
+    if update.effective_chat.id != TARGET_GROUP:
+        return
+
+    # 删除 Telegram 自动生成的“退出群组”消息
+    try:
+        if update.message:
+            await update.message.delete()
+            print(f"[删除退出消息] 用户 {update.message.from_user.id} 退出群组，已删除自动生成的消息")
+    except Exception as e:
+        print(f"[删除退出消息] 失败: {e}")
+        
 # ========== 群组事件处理 ==========
 async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """新用户加入时触发"""
