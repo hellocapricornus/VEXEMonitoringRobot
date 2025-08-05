@@ -231,6 +231,16 @@ async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 }
                 save_pending_users()
 
+async def safe_send_message(bot, user_id, text):
+    """尝试私聊消息，失败则返回 False"""
+    try:
+        await bot.send_message(chat_id=user_id, text=text)
+        return True
+    except Exception as e:
+        if "Forbidden" in str(e):  # 用户没和机器人私聊
+            return False
+        print(f"[提醒] 发送消息失败: {e}")
+        return False
 
 # ========== 定时检查 ==========
 async def remove_unsubscribed_users(context: ContextTypes.DEFAULT_TYPE):
@@ -245,51 +255,68 @@ async def remove_unsubscribed_users(context: ContextTypes.DEFAULT_TYPE):
         time_left = join_time + timedelta(hours=24) - now
 
         if timedelta(hours=0) < time_left <= timedelta(hours=3) and not data.get("reminded", False):
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text="⏳ 您的 24 小时试用即将到期，剩余 3 小时。请联系管理员续费 20 USDT 成为会员。"
-                )
-                pending_users[user_id]["reminded"] = True
-                print(f"[提醒] 试用用户 {user_id} 剩余 3 小时")
-            except Exception as e:
-                print(f"[提醒] 发送提醒失败: {e}")
+            reminder_text = "⏳ 您的 24 小时试用即将到期，剩余 3 小时，请联系管理员续费 20 USDT 成为会员。"
 
+            if not await safe_send_message(context.bot, user_id, reminder_text):
+                # 不能私聊 → 群提醒
+                await context.bot.send_message(
+                    chat_id=TARGET_GROUP,
+                    text=f"⏳ <a href='tg://user?id={user_id}'>用户</a> {reminder_text}",
+                    parse_mode="HTML"
+                )
+
+            pending_users[user_id]["reminded"] = True
+            print(f"[提醒] 试用用户 {user_id} 剩余 3 小时")
+
+        # 到期踢人
         if time_left <= timedelta(hours=0):
+            await context.bot.send_message(
+                chat_id=TARGET_GROUP,
+                text=f"⚠️ <a href='tg://user?id={user_id}'>用户</a> 试用已到期，将被移出群组！",
+                parse_mode="HTML"
+            )
             try:
                 await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
                 print(f"[踢人] 用户 {user_id} 已被移除")
             except Exception as e:
                 print(f"[踢人失败] 用户 {user_id}: {e}")
-            print(f"[踢人] 试用用户 {user_id} 已过期")
-            # pending_users.pop(user_id, None)  # 不删除记录，保留
 
     # 检查会员
     for user_id, data in list(members.items()):
-        expiry_time_str = data.get("expiry_time")
-        if expiry_time_str:
-            expiry_time = datetime.fromisoformat(expiry_time_str)
+        expiry_time = data.get("expiry_time")
+        if expiry_time:
+            expiry_time = datetime.fromisoformat(expiry_time).astimezone(BEIJING_TZ)
             time_left = expiry_time - now
 
             if timedelta(hours=0) < time_left <= timedelta(hours=3) and not data.get("reminded", False):
-                try:
-                    await context.bot.send_message(
-                        chat_id=user_id,
-                        text="⏳ 您的会员即将到期，剩余 3 小时，请联系管理员续费。"
-                    )
-                    members[user_id]["reminded"] = True
-                    print(f"[提醒] 会员 {user_id} 剩余 3 小时")
-                except Exception as e:
-                    print(f"[提醒] 发送提醒失败: {e}")
+                reminder_text = "⏳ 您的会员即将到期，剩余 3 小时，请联系管理员续费。"
 
+                if not await safe_send_message(context.bot, user_id, reminder_text):
+                    await context.bot.send_message(
+                        chat_id=TARGET_GROUP,
+                        text=f"⏳ <a href='tg://user?id={user_id}'>用户</a> {reminder_text}",
+                        parse_mode="HTML"
+                    )
+
+                members[user_id]["reminded"] = True
+                print(f"[提醒] 会员 {user_id} 剩余 3 小时")
+
+            # 到期踢人
             if time_left <= timedelta(hours=0):
-                await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
-                print(f"[踢人] 会员 {user_id} 已过期")
+                await context.bot.send_message(
+                    chat_id=TARGET_GROUP,
+                    text=f"⚠️ <a href='tg://user?id={user_id}'>用户</a> 会员已到期，将被移出群组！",
+                    parse_mode="HTML"
+                )
+                try:
+                    await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
+                    print(f"[踢人] 会员 {user_id} 已过期")
+                except Exception as e:
+                    print(f"[踢人失败] 会员 {user_id}: {e}")
                 members.pop(user_id, None)
 
     save_pending_users()
     save_members()
-
 # ========== 会员管理命令 ==========
 async def add_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -379,7 +406,7 @@ def main():
     app.add_handler(CommandHandler("remove_member", remove_member))
     app.add_handler(CommandHandler("view_members", view_members))
 
-    app.job_queue.run_repeating(remove_unsubscribed_users, interval=3600, first=10)
+    app.job_queue.run_repeating(remove_unsubscribed_users, interval=300, first=10)
 
     print("🤖 机器人启动成功，管理试用会员与会员功能")
     app.run_polling()
