@@ -411,13 +411,25 @@ async def remove_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) == 0:
         await update.message.reply_text("请输入要删除的会员ID")
         return
+
     user_id = int(context.args[0])
+
     if user_id in members:
+        # 删除会员记录
         members.pop(user_id)
         save_members()
-        await update.message.reply_text(f"✅ 已删除会员 {user_id}")
+
+        # 踢出群组 + 加入踢出列表
+        try:
+            await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
+            kicked_users[user_id] = {"kicked_time": datetime.now(BEIJING_TZ).isoformat()}
+            save_kicked_users()
+            await update.message.reply_text(f"✅ 已删除会员 {user_id} 并踢出群组")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 删除会员成功，但踢人失败: {e}")
     else:
         await update.message.reply_text(f"用户 {user_id} 不是会员")
+
 
 async def view_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
