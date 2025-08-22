@@ -263,7 +263,7 @@ async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
             else:
                 msg = await context.bot.send_message(
                     chat_id=TARGET_GROUP,
-                    text=f"👋 欢迎 {member.full_name}！你是新用户，24小时内可免费试用，试用期结束后将被踢出本群。续费 20 USDT 请联系管理员。"
+                    text=f"👋 欢迎 {member.full_name}！你是新用户，24小时内可免费试用，试用期结束后将被踢出本群。续费请联系管理员。"
                 )
                 context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
                 pending_users[user_id] = {"join_time": datetime.now(BEIJING_TZ), "reminded": False}
@@ -291,7 +291,7 @@ async def remove_unsubscribed_users(context: ContextTypes.DEFAULT_TYPE):
         time_left = join_time + timedelta(hours=24) - now
 
         if timedelta(hours=0) < time_left <= timedelta(hours=3) and not data.get("reminded", False):
-            reminder_text = "⏳ 您的 24 小时试用即将到期，剩余 3 小时，请联系管理员续费 20 USDT 成为会员。"
+            reminder_text = "⏳ 您的 24 小时试用即将到期，剩余 3 小时，请联系管理员续费成为会员。"
             if not await safe_send_message(context.bot, user_id, reminder_text):
                 msg = await context.bot.send_message(
                     chat_id=TARGET_GROUP,
@@ -415,7 +415,14 @@ async def remove_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in members:
         members.pop(user_id)
         save_members()
-        await update.message.reply_text(f"✅ 已删除会员 {user_id}")
+        # 踢出群组 + 加入踢出列表
+        try:
+            await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
+            kicked_users[user_id] = {"kicked_time": datetime.now(BEIJING_TZ).isoformat()}
+            save_kicked_users()
+            await update.message.reply_text(f"✅ 已删除会员 {user_id} 并踢出群组")
+        except Exception as e:
+            await update.message.reply_text(f"❌ 删除会员成功，但踢人失败: {e}")
     else:
         await update.message.reply_text(f"用户 {user_id} 不是会员")
 
