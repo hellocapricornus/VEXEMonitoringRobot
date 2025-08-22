@@ -444,6 +444,51 @@ async def view_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ])
         await update.message.reply_text(f"当前会员：\n{members_list}")
 
+# ========== 查看试用用户命令 ==========
+async def view_trials(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ 你没有权限")
+        return
+    
+    if not pending_users:
+        await update.message.reply_text("当前没有试用用户")
+        return
+
+    now = datetime.now(BEIJING_TZ)
+    trials_list = []
+
+    for uid, data in pending_users.items():
+        join_time = data["join_time"]
+        if isinstance(join_time, str):
+            join_time = datetime.fromisoformat(join_time).astimezone(BEIJING_TZ)
+        expiry_time = join_time + timedelta(hours=24)
+        time_left = expiry_time - now
+
+        # 已过期的不显示
+        if time_left.total_seconds() <= 0:
+            continue  
+
+        hours, remainder = divmod(int(time_left.total_seconds()), 3600)
+        minutes = remainder // 60
+
+        # 获取用户名（如果能拿到的话）
+        try:
+            user = await context.bot.get_chat(uid)
+            name = user.full_name
+        except Exception:
+            name = f"ID:{uid}"  # 如果获取失败，至少显示ID
+
+        trials_list.append((time_left, f"{name} - 剩余 {hours}小时{minutes}分钟"))
+
+    # 按剩余时间从少到多排序
+    trials_list.sort(key=lambda x: x[0])
+
+    if not trials_list:
+        await update.message.reply_text("当前没有正在试用的用户")
+    else:
+        output = "当前试用用户：\n" + "\n".join([item[1] for item in trials_list])
+        await update.message.reply_text(output)
+
 # ========== 机器人启动 ==========
 def main():
     migrate_data()
@@ -457,6 +502,7 @@ def main():
     app.add_handler(CommandHandler("set_member_expiry", set_member_expiry))
     app.add_handler(CommandHandler("remove_member", remove_member))
     app.add_handler(CommandHandler("view_members", view_members))
+    app.add_handler(CommandHandler("view_trials", view_trials))
     app.job_queue.run_repeating(remove_unsubscribed_users, interval=300, first=10)
     print("🤖 机器人启动成功，管理试用会员与会员功能")
     app.run_polling()
