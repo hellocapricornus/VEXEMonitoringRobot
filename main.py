@@ -417,7 +417,6 @@ async def remove_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in members:
         # 删除会员记录
         members.pop(user_id)
-        save_members()
 
         # 踢出群组 + 加入踢出列表
         try:
