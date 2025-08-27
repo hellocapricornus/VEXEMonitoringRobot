@@ -418,10 +418,7 @@ async def remove_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # 删除会员记录
         members.pop(user_id)
         save_members()
-<<<<<<< HEAD
-=======
 
->>>>>>> be3102bdc1b1cb726cc3113c887192e9c7a6a0f3
         # 踢出群组 + 加入踢出列表
         try:
             await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
