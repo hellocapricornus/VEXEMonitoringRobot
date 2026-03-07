@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, Con
 # ========== 配置 ==========
 BOT_TOKEN = "8327100795:AAHrFOBT5K-LHgW4IqdGY1CyJysSCXiQXDU"
 ADMIN_USER_ID = 8107909168
-TARGET_GROUP = -1002741490869  # 目标群组ID
+TARGET_GROUP = -1003878983546  # 目标群组ID
 
 # 文件路径
 MEMBER_FILE = "members.json"  # 会员文件
