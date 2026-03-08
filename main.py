@@ -1,511 +1,640 @@
-import json
 import os
+import subprocess
+import sys
+import sqlite3
+import logging
+import threading
 from datetime import datetime, timedelta
 import pytz
+import asyncio
+
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    MessageHandler,
+    CommandHandler,
+    ContextTypes,
+    filters
+)
 
-# ========== 配置 ==========
+# ================= 配置 =================
+
 BOT_TOKEN = "8327100795:AAHrFOBT5K-LHgW4IqdGY1CyJysSCXiQXDU"
-ADMIN_USER_ID = 8107909168
-TARGET_GROUP = -1003878983546  # 目标群组ID
 
-# 文件路径
-MEMBER_FILE = "members.json"  # 会员文件
-PENDING_USERS_FILE = "pending_users.json"  # 记录试用用户的文件
-KICKED_FILE = "kicked.json"  # 记录已踢用户文件
+ADMIN_ID = 8107909168
+GROUP_ID = -1003878983546
 
-members = {}
-pending_users = {}
-kicked_users = {}
+TRIAL_HOURS = 24
+REMIND_HOURS = 3
+DELETE_DELAY = 15
 
-# 北京时间
-BEIJING_TZ = pytz.timezone('Asia/Shanghai')
+BEIJING = pytz.timezone("Asia/Shanghai")
 
-# ========== 读取和保存踢出用户 ==========
-def load_kicked_users():
-    global kicked_users
-    if os.path.exists(KICKED_FILE):
-        try:
-            with open(KICKED_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f)
-            kicked_users = {int(k): v for k, v in raw.items()}
-            print(f"[加载] 已加载 {len(kicked_users)} 位被踢用户")
-        except Exception as e:
-            print(f"[加载] 读取踢出用户文件失败: {e}")
-            kicked_users = {}
-    else:
-        kicked_users = {}
+# ================= 日志 =================
 
-def save_kicked_users():
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+# ================= 数据库 =================
+
+db = sqlite3.connect(
+    "bot.db",
+    check_same_thread=False,
+    isolation_level=None
+)
+
+db_lock = threading.Lock()
+
+
+def db_execute(sql, args=()):
+    with db_lock:
+        cur = db.cursor()
+        cur.execute(sql, args)
+        db.commit()
+        return cur
+
+
+db_execute("""
+CREATE TABLE IF NOT EXISTS members(
+user_id INTEGER PRIMARY KEY,
+expire_time TEXT
+)
+""")
+
+db_execute("""
+CREATE TABLE IF NOT EXISTS trials(
+user_id INTEGER PRIMARY KEY,
+join_time TEXT,
+reminded INTEGER
+)
+""")
+
+db_execute("""
+CREATE TABLE IF NOT EXISTS kicked(
+user_id INTEGER PRIMARY KEY,
+kick_time TEXT
+)
+""")
+
+# ================= 工具 =================
+
+
+def now():
+    return datetime.now(BEIJING)
+
+
+def is_admin(uid):
+    return uid == ADMIN_ID
+
+
+async def auto_delete(context: ContextTypes.DEFAULT_TYPE):
+    msg = context.job.data
     try:
-        with open(KICKED_FILE, "w", encoding="utf-8") as f:
-            json.dump(kicked_users, f, ensure_ascii=False, indent=2)
-        print(f"[保存] 已保存 {len(kicked_users)} 位被踢用户")
-    except Exception as e:
-        print(f"[保存] 保存踢出用户文件失败: {e}")
+        await context.bot.delete_message(msg.chat_id, msg.message_id)
+    except:
+        pass
 
-# ========== 数据修复 ==========
-def migrate_data():
-    """自动修复会员和试用用户文件结构"""
-    if os.path.exists(MEMBER_FILE):
-        try:
-            with open(MEMBER_FILE, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
 
-            fixed = {}
-            for k, v in raw_data.items():
-                if isinstance(v, dict):
-                    fixed[int(k)] = {
-                        "join_time": v.get("join_time"),
-                        "expiry_time": v.get("expiry_time"),
-                        "reminded": v.get("reminded", False)
-                    }
-                else:
-                    fixed[int(k)] = {
-                        "join_time": v,
-                        "expiry_time": None,
-                        "reminded": False
-                    }
+async def send_temp(context, text, chat_id=GROUP_ID):
 
-            with open(MEMBER_FILE, "w", encoding="utf-8") as f:
-                json.dump(fixed, f, ensure_ascii=False, indent=2)
-            print(f"[修复] 会员文件完成，共 {len(fixed)} 条记录")
-        except Exception as e:
-            print(f"[修复] 会员文件失败: {e}")
+    msg = await context.bot.send_message(chat_id, text)
 
-    if os.path.exists(PENDING_USERS_FILE):
-        try:
-            with open(PENDING_USERS_FILE, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
+    context.job_queue.run_once(
+        auto_delete,
+        DELETE_DELAY,
+        data=msg
+    )
 
-            fixed = {}
-            for k, v in raw_data.items():
-                if isinstance(v, dict):
-                    fixed[int(k)] = {
-                        "join_time": v.get("join_time"),
-                        "reminded": v.get("reminded", False)
-                    }
-                else:
-                    fixed[int(k)] = {
-                        "join_time": v,
-                        "reminded": False
-                    }
 
-            with open(PENDING_USERS_FILE, "w", encoding="utf-8") as f:
-                json.dump(fixed, f, ensure_ascii=False, indent=2)
-            print(f"[修复] 试用用户文件完成，共 {len(fixed)} 条记录")
-        except Exception as e:
-            print(f"[修复] 试用用户文件失败: {e}")
+async def kick_user(context, uid):
 
-# ========== 会员数据管理 ==========
-def load_members():
-    global members
-    if os.path.exists(MEMBER_FILE):
-        try:
-            with open(MEMBER_FILE, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
-            members = {
-                int(k): {
-                    "join_time": v.get("join_time"),
-                    "expiry_time": v.get("expiry_time"),
-                    "reminded": v.get("reminded", False)
-                }
-                for k, v in raw_data.items()
-            }
-            print(f"[加载] 已加载 {len(members)} 位会员")
-        except Exception as e:
-            print(f"[加载] 读取失败: {e}")
-            members = {}
-    else:
-        members = {}
-
-def save_members():
     try:
-        with open(MEMBER_FILE, "w", encoding="utf-8") as f:
-            json.dump(members, f, ensure_ascii=False, indent=2)
-        print(f"[保存] 已保存 {len(members)} 位会员")
+
+        await context.bot.ban_chat_member(GROUP_ID, uid)
+        await context.bot.unban_chat_member(GROUP_ID, uid)
+
+        db_execute(
+            "INSERT OR REPLACE INTO kicked VALUES(?,?)",
+            (uid, now().isoformat())
+        )
+
+        logging.info(f"踢出用户 {uid}")
+
     except Exception as e:
-        print(f"[保存] 保存失败: {e}")
 
-def load_pending_users():
-    global pending_users
-    if os.path.exists(PENDING_USERS_FILE):
-        try:
-            with open(PENDING_USERS_FILE, "r", encoding="utf-8") as f:
-                raw_data = json.load(f)
-            fixed_users = {}
-            for k, v in raw_data.items():
-                try:
-                    if isinstance(v, dict):
-                        join_time = datetime.fromisoformat(v["join_time"])
-                        if join_time.tzinfo is None:
-                            join_time = join_time.replace(tzinfo=BEIJING_TZ)
-                        else:
-                            join_time = join_time.astimezone(BEIJING_TZ)
-                        fixed_users[int(k)] = {
-                            "join_time": join_time,
-                            "reminded": v.get("reminded", False)
-                        }
-                    else:
-                        join_time = datetime.fromisoformat(v)
-                        if join_time.tzinfo is None:
-                            join_time = join_time.replace(tzinfo=BEIJING_TZ)
-                        fixed_users[int(k)] = {
-                            "join_time": join_time,
-                            "reminded": False
-                        }
-                except Exception as e:
-                    print(f"[修正] 用户 {k} 的时间数据无效: {e}")
-            pending_users = fixed_users
-            print(f"[加载] 待关注用户 {len(pending_users)} 条")
-        except Exception as e:
-            print(f"[加载] 读取失败: {e}")
-            pending_users = {}
-    else:
-        pending_users = {}
+        logging.error(f"踢人失败 {uid} {e}")
 
-def save_pending_users():
+async def delete_kick_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not hasattr(msg, "left_chat_member"):
+        return
     try:
-        data = {
-            str(k): {
-                "join_time": v["join_time"] if isinstance(v["join_time"], str) else v["join_time"].isoformat(),
-                "reminded": v.get("reminded", False)
-            }
-            for k, v in pending_users.items()
-        }
-        with open(PENDING_USERS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        print(f"[保存] 待关注用户 {len(pending_users)} 条")
+        await asyncio.sleep(15)  # 延迟 15 秒后删除
+        await msg.delete()
     except Exception as e:
-        print(f"[保存] 保存失败: {e}")
+        logging.warning(f"删除 LEFT_CHAT_MEMBER 消息失败: {e}")
 
-# ========== 工具函数 ==========
-def is_admin(user_id):
-    return user_id == ADMIN_USER_ID
 
-async def check_user_subscribed(app, user_id) -> bool:
-    data = members.get(user_id)
-    if not data:
+# ================= 群成员检测 =================
+
+
+async def user_in_group(context, uid):
+
+    try:
+
+        m = await context.bot.get_chat_member(GROUP_ID, uid)
+
+        if m.status in ["member", "administrator", "creator"]:
+            return True
+
         return False
-    expiry_time = data.get("expiry_time")
-    if not expiry_time:
-        return True
-    expiry_time = datetime.fromisoformat(expiry_time)
-    if expiry_time.tzinfo is None:
-        expiry_time = expiry_time.replace(tzinfo=BEIJING_TZ)
-    else:
-        expiry_time = expiry_time.astimezone(BEIJING_TZ)
-    return expiry_time > datetime.now(BEIJING_TZ)
 
-# 延迟删除消息
-async def delete_message_after_delay(context: ContextTypes.DEFAULT_TYPE):
-    chat_id = context.job.data["chat_id"]
-    message_id = context.job.data["message_id"]
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except Exception as e:
-        print(f"[删除消息失败] {e}")
+    except:
+        return False
 
-# 监听用户退出群组
-async def handle_user_left(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != TARGET_GROUP:
+
+async def clean_database(context):
+
+    logging.info("同步群成员状态")
+
+    rows = db_execute("SELECT user_id FROM trials").fetchall()
+
+    for (uid,) in rows:
+
+        inside = await user_in_group(context, uid)
+
+        if not inside:
+
+            db_execute(
+                "DELETE FROM trials WHERE user_id=?",
+                (uid,)
+            )
+
+    rows = db_execute("SELECT user_id FROM members").fetchall()
+
+    for (uid,) in rows:
+
+        inside = await user_in_group(context, uid)
+
+        if not inside:
+
+            db_execute(
+                "DELETE FROM members WHERE user_id=?",
+                (uid,)
+            )
+
+
+# ================= 新成员 =================
+
+
+async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if update.effective_chat.id != GROUP_ID:
         return
-    try:
-        if update.message:
-            await update.message.delete()
-            print(f"[删除退出消息] 用户 {update.message.from_user.id} 退出群组")
-    except Exception as e:
-        print(f"[删除退出消息] 失败: {e}")
 
-# ========== 群组事件 ==========
-async def greet_new_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.id != TARGET_GROUP:
-        return
     try:
         await update.message.delete()
-    except Exception as e:
-        print(f"[删除加入消息] 失败: {e}")
+    except:
+        pass
 
-    for member in update.message.new_chat_members:
-        user_id = member.id
-        
-        # 检查是否曾被踢出
-        if user_id in kicked_users:
-            try:
-                msg = await context.bot.send_message(
-                    chat_id=TARGET_GROUP,
-                    text=f"⚠️ 用户 {member.full_name} 曾被移除，需购买会员后才能加入。"
-                )
-                context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
-                await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
-                print(f"[踢人] 用户 {user_id} 曾被踢出，已拒绝加入")
-            except Exception as e:
-                print(f"[踢人失败] 用户 {user_id} 被拒绝加入: {e}")
+    for m in update.message.new_chat_members:
+
+        uid = m.id
+
+        r = db_execute(
+            "SELECT * FROM kicked WHERE user_id=?",
+            (uid,)
+        ).fetchone()
+
+        if r:
+            await kick_user(context, uid)
             continue
 
-        if await check_user_subscribed(context.application, user_id):
-            print(f"[欢迎] 用户 {user_id} 已是会员")
-            pending_users.pop(user_id, None)
-            save_pending_users()
-        else:
-            if user_id in pending_users:
-                msg = await context.bot.send_message(
-                    chat_id=TARGET_GROUP,
-                    text=f"⚠️ 用户 {member.full_name} 试用已结束，请购买会员后再加入。"
-                )
-                context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
-                try:
-                    await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
-                except Exception as e:
-                    print(f"[踢人失败] 试用用户 {user_id}: {e}")
-                print(f"[踢人] 用户 {user_id} 试用已结束")
-            else:
-                msg = await context.bot.send_message(
-                    chat_id=TARGET_GROUP,
-                    text=f"👋 欢迎 {member.full_name}！你是新用户，24小时内可免费试用，试用期结束后将被踢出本群。续费请联系管理员。"
-                )
-                context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
-                pending_users[user_id] = {"join_time": datetime.now(BEIJING_TZ), "reminded": False}
-                save_pending_users()
+        r = db_execute(
+            "SELECT * FROM members WHERE user_id=?",
+            (uid,)
+        ).fetchone()
 
-async def safe_send_message(bot, user_id, text):
-    try:
-        await bot.send_message(chat_id=user_id, text=text)
-        return True
-    except Exception as e:
-        if "Forbidden" in str(e):
-            return False
-        print(f"[提醒] 发送消息失败: {e}")
-        return False
+        if r:
+            continue
 
-# ========== 定时检查 ==========
-async def remove_unsubscribed_users(context: ContextTypes.DEFAULT_TYPE):
-    now = datetime.now(BEIJING_TZ)
+        r = db_execute(
+            "SELECT * FROM trials WHERE user_id=?",
+            (uid,)
+        ).fetchone()
 
-    # 检查试用用户
-    for user_id, data in list(pending_users.items()):
-        join_time = data["join_time"]
-        if isinstance(join_time, str):
-            join_time = datetime.fromisoformat(join_time).astimezone(BEIJING_TZ)
-        time_left = join_time + timedelta(hours=24) - now
+        if r:
+            await kick_user(context, uid)
+            continue
 
-        if timedelta(hours=0) < time_left <= timedelta(hours=3) and not data.get("reminded", False):
-            reminder_text = "⏳ 您的 24 小时试用即将到期，剩余 3 小时，请联系管理员续费成为会员。"
-            if not await safe_send_message(context.bot, user_id, reminder_text):
-                msg = await context.bot.send_message(
-                    chat_id=TARGET_GROUP,
-                    text=f"⏳ <a href='tg://user?id={user_id}'>用户</a> {reminder_text}",
-                    parse_mode="HTML"
-                )
-                context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
-            pending_users[user_id]["reminded"] = True
+        db_execute(
+            "INSERT INTO trials VALUES(?,?,0)",
+            (uid, now().isoformat())
+        )
 
-        # 试用过期 → 踢人并移除记录 + 写入踢出列表
-        if time_left <= timedelta(hours=0):
-            msg = await context.bot.send_message(
-                chat_id=TARGET_GROUP,
-                text=f"⚠️ <a href='tg://user?id={user_id}'>用户</a> 试用已到期，将被移出群组！",
-                parse_mode="HTML"
+        await send_temp(
+            context,
+            f"👋 欢迎 {m.full_name}\n\n"
+            f"你可以免费试用 {TRIAL_HOURS} 小时"
+        )
+
+
+# ================= 定时检查 =================
+
+
+async def check_users(context: ContextTypes.DEFAULT_TYPE):
+
+    current = now()
+
+    logging.info("定时检查运行")
+
+    rows = db_execute("SELECT * FROM trials").fetchall()
+
+    for uid, join, reminded in rows:
+        
+        # 如果已经是会员，跳过
+        r = db_execute(
+            "SELECT * FROM members WHERE user_id=?",
+            (uid,)
+        ).fetchone()
+
+        if r:
+            continue
+
+        join = datetime.fromisoformat(join).astimezone(BEIJING)
+
+        expire = join + timedelta(hours=TRIAL_HOURS)
+
+        left = expire - current
+
+        if left <= timedelta(0):
+
+            await send_temp(context, f"⚠️ 用户 {uid} 试用到期")
+
+            await kick_user(context, uid)
+
+            db_execute(
+                "DELETE FROM trials WHERE user_id=?",
+                (uid,)
             )
-            context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
+
+        elif left <= timedelta(hours=REMIND_HOURS) and reminded == 0:
+
             try:
-                await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
-                # 写入踢出列表
-                kicked_users[user_id] = {"kicked_time": datetime.now(BEIJING_TZ).isoformat()}
-                save_kicked_users()
-            except Exception as e:
-                print(f"[踢人失败] 试用用户 {user_id}: {e}")
-            pending_users.pop(user_id, None)  # 删除试用记录
 
-    # 检查会员
-    for user_id, data in list(members.items()):
-        expiry_time = data.get("expiry_time")
-        if expiry_time:
-            expiry_time = datetime.fromisoformat(expiry_time).astimezone(BEIJING_TZ)
-            time_left = expiry_time - now
-            if timedelta(hours=0) < time_left <= timedelta(hours=3) and not data.get("reminded", False):
-                reminder_text = "⏳ 您的会员即将到期，剩余 3 小时，请联系管理员续费。"
-                if not await safe_send_message(context.bot, user_id, reminder_text):
-                    msg = await context.bot.send_message(
-                        chat_id=TARGET_GROUP,
-                        text=f"⏳ <a href='tg://user?id={user_id}'>用户</a> {reminder_text}",
-                        parse_mode="HTML"
-                    )
-                    context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
-                members[user_id]["reminded"] = True
-
-            # 会员过期 → 踢人并移除记录 + 写入踢出列表
-            if time_left <= timedelta(hours=0):
-                msg = await context.bot.send_message(
-                    chat_id=TARGET_GROUP,
-                    text=f"⚠️ <a href='tg://user?id={user_id}'>用户</a> 会员已到期，将被移出群组！",
-                    parse_mode="HTML"
+                await context.bot.send_message(
+                    uid,
+                    "⏳ 试用剩余3小时，请联系管理员续费"
                 )
-                context.job_queue.run_once(delete_message_after_delay, 10, data={"chat_id": msg.chat_id, "message_id": msg.message_id})
-                try:
-                    await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
-                    # 写入踢出列表
-                    kicked_users[user_id] = {"kicked_time": datetime.now(BEIJING_TZ).isoformat()}
-                    save_kicked_users()
-                except Exception as e:
-                    print(f"[踢人失败] 会员 {user_id}: {e}")
-                members.pop(user_id, None)  # 删除会员记录
 
-    save_pending_users()
-    save_members()
+            except:
+                pass
 
-# ========== 会员管理命令 ==========
+            await send_temp(
+                context,
+                f"⏳ 用户 {uid} 试用剩余3小时"
+            )
+
+            db_execute(
+                "UPDATE trials SET reminded=1 WHERE user_id=?",
+                (uid,)
+            )
+
+    rows = db_execute("SELECT * FROM members").fetchall()
+
+    for uid, expire in rows:
+
+        if expire is None:
+            continue
+
+        expire = datetime.fromisoformat(expire).astimezone(BEIJING)
+
+        if expire <= current:
+
+            await send_temp(context, f"⚠️ 用户 {uid} 会员到期")
+
+            await kick_user(context, uid)
+
+            db_execute(
+                "DELETE FROM members WHERE user_id=?",
+                (uid,)
+            )
+
+    await clean_database(context)
+
+
+# ================= 管理命令 =================
+
+def update_bot():
+    try:
+        # 拉取最新代码
+        subprocess.run(["git", "pull"], check=True)
+        # 重启脚本
+        os.execv(sys.executable, ["python"] + sys.argv)
+    except Exception as e:
+        print("更新失败:", e)
+
+async def update_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 只允许管理员私聊机器人触发
+    if update.effective_user.id != ADMIN_ID:
+        return
+
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("请在私聊中使用此命令更新机器人")
+        return
+
+    msg = await update.message.reply_text("🔄 正在检查更新...")
+
+    try:
+        # git 拉取最新代码
+        result = subprocess.run(
+            ["git", "pull"], capture_output=True, text=True
+        )
+
+        output = result.stdout.strip()
+
+        if "Already up to date." in output:
+            await msg.edit_text("✅ 未找到新代码，已经是最新版本")
+            return
+
+        # 找到新代码
+        await msg.edit_text("⚡ 找到新代码，正在更新...")
+
+        # 可选：显示 git 输出摘要
+        summary = "\n".join(output.splitlines()[-5:])  # 只取最后5行
+        await context.bot.send_message(
+            ADMIN_ID,
+            f"Git 拉取输出:\n{summary}"
+        )
+
+        await msg.edit_text("✅ 更新完成，正在重启机器人...")
+
+        # 重启脚本
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    except Exception as e:
+        await msg.edit_text(f"❌ 更新失败: {e}")
+
+async def trials_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    rows = db_execute("SELECT * FROM trials").fetchall()
+
+    if not rows:
+        await update.message.reply_text("没有试用用户")
+        return
+
+    text = "试用用户\n\n"
+
+    for uid, join, _ in rows:
+
+        join = datetime.fromisoformat(join).astimezone(BEIJING)
+
+        expire = join + timedelta(hours=TRIAL_HOURS)
+
+        # 获取用户名
+        try:
+            member = await context.bot.get_chat_member(GROUP_ID, uid)
+            name = member.user.full_name
+        except:
+            name = "未知用户"
+
+        text += f"{name} ({uid}) 到期 {expire.strftime('%Y-%m-%d %H:%M')}\n"
+
+    await update.message.reply_text(text)
+
+async def members_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    rows = db_execute("SELECT * FROM members").fetchall()
+
+    if not rows:
+        await update.message.reply_text("没有会员")
+        return
+
+    text = "会员列表\n\n"
+
+    for uid, expire in rows:
+
+        if expire:
+
+            expire = datetime.fromisoformat(expire).astimezone(BEIJING)
+
+            try:
+                member = await context.bot.get_chat_member(GROUP_ID, uid)
+                name = member.user.full_name
+            except:
+                name = "未知用户"
+
+            text += f"{name} ({uid}) 到期 {expire.strftime('%Y-%m-%d %H:%M')}\n"
+
+        else:
+
+            text += f"{uid} 永久会员\n"
+
+    await update.message.reply_text(text)
+
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("用法: /unban 用户ID")
+        return
+
+    uid = int(context.args[0])
+
+    try:
+        await context.bot.unban_chat_member(GROUP_ID, uid)
+    except:
+        pass
+
+    db_execute(
+        "DELETE FROM kicked WHERE user_id=?",
+        (uid,)
+    )
+
+    await update.message.reply_text("用户已解封")
+
+async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("用法: /kick 用户ID")
+        return
+
+    uid = int(context.args[0])
+
+    await kick_user(context, uid)
+
+    await update.message.reply_text("用户已踢出")
+
+async def add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.effective_user.id):
+        return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("用法: /trial 用户ID")
+        return
+
+    uid = int(context.args[0])
+
+    r = db_execute(
+        "SELECT * FROM members WHERE user_id=?",
+        (uid,)
+    ).fetchone()
+
+    if r:
+        await update.message.reply_text("该用户已经是会员")
+        return
+
+    r = db_execute(
+        "SELECT * FROM trials WHERE user_id=?",
+        (uid,)
+    ).fetchone()
+
+    if r:
+        await update.message.reply_text("该用户已经在试用")
+        return
+
+    db_execute(
+        "INSERT INTO trials VALUES(?,?,0)",
+        (uid, now().isoformat())
+    )
+
+    await update.message.reply_text("试用添加成功")
+
 async def add_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 你没有权限")
-        return
-    if len(context.args) == 0:
-        await update.message.reply_text("请输入会员的 Telegram ID")
-        return
-    user_id = int(context.args[0])
-    members[user_id] = {
-        "join_time": datetime.now(BEIJING_TZ).isoformat(),
-        "expiry_time": None,
-        "reminded": False
-    }
-    # 会员加入时，从踢出列表移除
-    if user_id in kicked_users:
-        kicked_users.pop(user_id)
-        save_kicked_users()
 
-    pending_users.pop(user_id, None)
-    save_members()
-    save_pending_users()
-    await update.message.reply_text(f"✅ 已将用户 {user_id} 添加为会员")
-
-async def set_member_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 你没有权限")
         return
+
+    if len(context.args) < 1:
+        await update.message.reply_text("用法: /add 用户ID")
+        return
+
+    uid = int(context.args[0])
+
+    db_execute(
+        "INSERT OR REPLACE INTO members VALUES(?,NULL)",
+        (uid,)
+    )
+
+    db_execute("DELETE FROM trials WHERE user_id=?", (uid,))
+    db_execute("DELETE FROM kicked WHERE user_id=?", (uid,))
+
+    await update.message.reply_text("会员添加成功")
+
+
+async def extend_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not is_admin(update.effective_user.id):
+        return
+
     if len(context.args) < 2:
-        await update.message.reply_text("请输入用户ID和天数")
+        await update.message.reply_text("用法: /extend 用户ID 天数")
         return
-    user_id = int(context.args[0])
-    expiry_days = int(context.args[1])
-    if user_id in members:
-        expiry_time = datetime.now(BEIJING_TZ) + timedelta(days=expiry_days)
-        members[user_id]["expiry_time"] = expiry_time.isoformat()
-        members[user_id]["reminded"] = False
-        # 会员更新时，从踢出列表移除
-        if user_id in kicked_users:
-            kicked_users.pop(user_id)
-            save_kicked_users()
 
-        pending_users.pop(user_id, None)
-        save_members()
-        save_pending_users()
-        await update.message.reply_text(f"✅ 用户 {user_id} 会员有效期设置为 {expiry_days} 天")
+    uid = int(context.args[0])
+    days = int(context.args[1])
+
+    r = db_execute(
+        "SELECT expire_time FROM members WHERE user_id=?",
+        (uid,)
+    ).fetchone()
+
+    if r and r[0]:
+
+        old = datetime.fromisoformat(r[0]).astimezone(BEIJING)
+
+        if old > now():
+            expire = old + timedelta(days=days)
+        else:
+            expire = now() + timedelta(days=days)
+
     else:
-        await update.message.reply_text(f"用户 {user_id} 不是会员")
 
-async def remove_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        expire = now() + timedelta(days=days)
+
+    db_execute(
+        "INSERT OR REPLACE INTO members VALUES(?,?)",
+        (uid, expire.isoformat())
+    )
+
+    db_execute(
+        "DELETE FROM trials WHERE user_id=?",
+        (uid,)
+    )
+
+    await update.message.reply_text("会员延期成功")
+
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 你没有权限")
-        return
-    if len(context.args) == 0:
-        await update.message.reply_text("请输入要删除的会员ID")
         return
 
-    user_id = int(context.args[0])
+    trials = db_execute("SELECT COUNT(*) FROM trials").fetchone()[0]
+    members = db_execute("SELECT COUNT(*) FROM members").fetchone()[0]
+    kicked = db_execute("SELECT COUNT(*) FROM kicked").fetchone()[0]
 
-    if user_id in members:
-        # 删除会员记录
-        members.pop(user_id)
-        save_members()
+    text = (
+        f"📊 机器人统计\n\n"
+        f"试用用户: {trials}\n"
+        f"会员: {members}\n"
+        f"封禁: {kicked}"
+    )
 
-        # 踢出群组 + 加入踢出列表
-        try:
-            await context.bot.ban_chat_member(chat_id=TARGET_GROUP, user_id=user_id)
-            kicked_users[user_id] = {"kicked_time": datetime.now(BEIJING_TZ).isoformat()}
-            save_kicked_users()
-            await update.message.reply_text(f"✅ 已删除会员 {user_id} 并踢出群组")
-        except Exception as e:
-            await update.message.reply_text(f"❌ 删除会员成功，但踢人失败: {e}")
-    else:
-        await update.message.reply_text(f"用户 {user_id} 不是会员")
+    await update.message.reply_text(text)
 
 
-async def view_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 你没有权限")
-        return
-    if not members:
-        await update.message.reply_text("当前没有会员")
-    else:
-        members_list = "\n".join([
-            f"ID: {uid}, 加入: {data['join_time']}, 到期: {data['expiry_time']}"
-            for uid, data in members.items()
-        ])
-        await update.message.reply_text(f"当前会员：\n{members_list}")
+# ================= 启动 =================
 
-# ========== 查看试用用户命令 ==========
-async def view_trials(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("❌ 你没有权限")
-        return
-    
-    if not pending_users:
-        await update.message.reply_text("当前没有试用用户")
-        return
 
-    now = datetime.now(BEIJING_TZ)
-    trials_list = []
-
-    for uid, data in pending_users.items():
-        join_time = data["join_time"]
-        if isinstance(join_time, str):
-            join_time = datetime.fromisoformat(join_time).astimezone(BEIJING_TZ)
-        expiry_time = join_time + timedelta(hours=24)
-        time_left = expiry_time - now
-
-        # 已过期的不显示
-        if time_left.total_seconds() <= 0:
-            continue  
-
-        hours, remainder = divmod(int(time_left.total_seconds()), 3600)
-        minutes = remainder // 60
-
-        # 获取用户名（如果能拿到的话）
-        try:
-            user = await context.bot.get_chat(uid)
-            name = user.full_name
-        except Exception:
-            name = f"ID:{uid}"  # 如果获取失败，至少显示ID
-
-        trials_list.append((time_left, f"{name} - 剩余 {hours}小时{minutes}分钟"))
-
-    # 按剩余时间从少到多排序
-    trials_list.sort(key=lambda x: x[0])
-
-    if not trials_list:
-        await update.message.reply_text("当前没有正在试用的用户")
-    else:
-        output = "当前试用用户：\n" + "\n".join([item[1] for item in trials_list])
-        await update.message.reply_text(output)
-
-# ========== 机器人启动 ==========
 def main():
-    migrate_data()
-    load_members()
-    load_pending_users()
-    load_kicked_users()
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, greet_new_members))
-    app.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, handle_user_left))
-    app.add_handler(CommandHandler("add_member", add_member))
-    app.add_handler(CommandHandler("set_member_expiry", set_member_expiry))
-    app.add_handler(CommandHandler("remove_member", remove_member))
-    app.add_handler(CommandHandler("view_members", view_members))
-    app.add_handler(CommandHandler("view_trials", view_trials))
-    app.job_queue.run_repeating(remove_unsubscribed_users, interval=300, first=10)
-    print("🤖 机器人启动成功，管理试用会员与会员功能")
+
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.NEW_CHAT_MEMBERS,
+            new_member
+        )
+    )
+
+    app.add_handler(
+        MessageHandler(
+            filters.StatusUpdate.LEFT_CHAT_MEMBER,
+            delete_kick_message
+        )
+    )
+
+    app.add_handler(CommandHandler("add", add_member))
+    app.add_handler(CommandHandler("extend", extend_member))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("trial", add_trial))
+    app.add_handler(CommandHandler("kick", kick_cmd))
+    app.add_handler(CommandHandler("unban", unban))
+    app.add_handler(CommandHandler("members", members_list))
+    app.add_handler(CommandHandler("trials", trials_list))
+    app.add_handler(CommandHandler("update", update_command))
+
+    app.job_queue.run_repeating(check_users, 300, first=10)
+
+    logging.info("机器人启动成功")
+
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
