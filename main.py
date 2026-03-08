@@ -26,7 +26,7 @@ GROUP_ID = -1003878983546
 
 TRIAL_HOURS = 24
 REMIND_HOURS = 3
-DELETE_DELAY = 15
+DELETE_DELAY = 3
 
 BEIJING = pytz.timezone("Asia/Shanghai")
 
@@ -97,44 +97,66 @@ async def auto_delete(context: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-async def send_temp(context, text, chat_id=GROUP_ID):
+# ================= 工具 =================
 
-    msg = await context.bot.send_message(chat_id, text)
-
-    context.job_queue.run_once(
-        auto_delete,
-        DELETE_DELAY,
-        data=msg
+async def send_temp(context, text, chat_id=GROUP_ID, delay=DELETE_DELAY):
+    """
+    发送临时消息，并显示倒计时
+    """
+    # 发送初始消息
+    msg = await context.bot.send_message(
+        chat_id,
+        f"{text}\n\n⏳ 消息将在 {delay} 秒后自动删除"
     )
 
+    # 每秒更新倒计时
+    for remaining in range(delay - 1, 0, -1):
+        try:
+            await msg.edit_text(f"{text}\n\n⏳ 消息将在 {remaining} 秒后自动删除")
+            await asyncio.sleep(1)
+        except Exception as e:
+            # 消息被删除或编辑失败就停止
+            logging.warning(f"倒计时更新失败: {e}")
+            break
 
-async def kick_user(context, uid):
-
+    # 最终删除消息
     try:
+        await msg.delete()
+    except Exception as e:
+        logging.warning(f"自动删除消息失败: {e}")
 
+
+async def kick_user(context, uid, reason="未通过试用或会员到期"):
+    """
+    踢出用户并私聊通知原因，同时在群里显示倒计时提示
+    """
+    try:
+        # 先尝试私聊通知
+        try:
+            await context.bot.send_message(
+                uid,
+                f"⚠️ 你已被移出群聊\n原因: {reason}\n如有疑问请联系管理员"
+            )
+        except Exception as e:
+            logging.warning(f"通知用户 {uid} 失败，用户可能未与机器人私聊过: {e}")
+
+        # 踢出群
         await context.bot.ban_chat_member(GROUP_ID, uid)
         await context.bot.unban_chat_member(GROUP_ID, uid)
 
+        # 在群里发送临时消息显示倒计时
+        await send_temp(context, f"⚠️ 用户 {uid} 已被移出群聊，原因: {reason}")
+
+        # 记录数据库
         db_execute(
             "INSERT OR REPLACE INTO kicked VALUES(?,?)",
             (uid, now().isoformat())
         )
 
-        logging.info(f"踢出用户 {uid}")
+        logging.info(f"踢出用户 {uid}, 原因: {reason}")
 
     except Exception as e:
-
-        logging.error(f"踢人失败 {uid} {e}")
-
-async def delete_kick_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not hasattr(msg, "left_chat_member"):
-        return
-    try:
-        await asyncio.sleep(15)  # 延迟 15 秒后删除
-        await msg.delete()
-    except Exception as e:
-        logging.warning(f"删除 LEFT_CHAT_MEMBER 消息失败: {e}")
+        logging.error(f"踢人失败 {uid}: {e}")
 
 
 # ================= 群成员检测 =================
@@ -241,6 +263,21 @@ async def new_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+    # ================= 删除离开消息 =================
+async def delete_kick_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not hasattr(msg, "left_chat_member"):
+        return
+    try:
+        user_name = msg.left_chat_member.full_name
+        text = f"⚠️ 用户 {user_name} 已离开群聊"
+        # 用 send_temp 处理倒计时删除
+        await send_temp(context, text, chat_id=msg.chat_id, delay=DELETE_DELAY)
+        # 删除原消息
+        await msg.delete()
+    except Exception as e:
+        logging.warning(f"删除 LEFT_CHAT_MEMBER 消息失败: {e}")
+
 # ================= 定时检查 =================
 
 
@@ -270,37 +307,18 @@ async def check_users(context: ContextTypes.DEFAULT_TYPE):
         left = expire - current
 
         if left <= timedelta(0):
-
             await send_temp(context, f"⚠️ 用户 {uid} 试用到期")
-
-            await kick_user(context, uid)
-
-            db_execute(
-                "DELETE FROM trials WHERE user_id=?",
-                (uid,)
-            )
+            await kick_user(context, uid, reason="试用到期")
+            db_execute("DELETE FROM trials WHERE user_id=?", (uid,))
 
         elif left <= timedelta(hours=REMIND_HOURS) and reminded == 0:
-
             try:
-
-                await context.bot.send_message(
-                    uid,
-                    "⏳ 试用剩余3小时，请联系管理员续费"
-                )
-
+                await context.bot.send_message(uid, "⏳ 试用剩余3小时，请联系管理员续费")
             except:
                 pass
 
-            await send_temp(
-                context,
-                f"⏳ 用户 {uid} 试用剩余3小时"
-            )
-
-            db_execute(
-                "UPDATE trials SET reminded=1 WHERE user_id=?",
-                (uid,)
-            )
+            await send_temp(context, f"⏳ 用户 {uid} 试用剩余3小时")
+            db_execute("UPDATE trials SET reminded=1 WHERE user_id=?", (uid,))
 
     rows = db_execute("SELECT * FROM members").fetchall()
 
@@ -312,15 +330,9 @@ async def check_users(context: ContextTypes.DEFAULT_TYPE):
         expire = datetime.fromisoformat(expire).astimezone(BEIJING)
 
         if expire <= current:
-
             await send_temp(context, f"⚠️ 用户 {uid} 会员到期")
-
-            await kick_user(context, uid)
-
-            db_execute(
-                "DELETE FROM members WHERE user_id=?",
-                (uid,)
-            )
+            await kick_user(context, uid, reason="会员到期")
+            db_execute("DELETE FROM members WHERE user_id=?", (uid,))
 
     await clean_database(context)
 
@@ -488,17 +500,17 @@ async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("用户已解封")
 
 async def kick_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
     if not is_admin(update.effective_user.id):
         return
 
     if len(context.args) < 1:
-        await update.message.reply_text("用法: /kick 用户ID")
+        await update.message.reply_text("用法: /kick 用户ID [原因]")
         return
 
     uid = int(context.args[0])
+    reason = " ".join(context.args[1:]) if len(context.args) > 1 else "管理员操作"
 
-    await kick_user(context, uid)
+    await kick_user(context, uid, reason=reason)
 
     await update.message.reply_text("用户已踢出")
 
