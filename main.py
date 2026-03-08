@@ -471,8 +471,12 @@ async def members_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text += f"{name} ({uid}) 到期 {expire.strftime('%Y-%m-%d %H:%M')}\n"
 
         else:
-
-            text += f"{uid} 永久会员\n"
+            try:
+                member = await context.bot.get_chat_member(GROUP_ID, uid)
+                name = member.user.full_name
+            except:
+                name = str(uid)
+            text += f"{name} 永久会员\n"
 
     await update.message.reply_text(text)
 
