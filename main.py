@@ -253,7 +253,7 @@ async def check_users(context: ContextTypes.DEFAULT_TYPE):
     rows = db_execute("SELECT * FROM trials").fetchall()
 
     for uid, join, reminded in rows:
-        
+
         # 如果已经是会员，跳过
         r = db_execute(
             "SELECT * FROM members WHERE user_id=?",
@@ -326,6 +326,30 @@ async def check_users(context: ContextTypes.DEFAULT_TYPE):
 
 
 # ================= 管理命令 =================
+
+async def kicked_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+
+    rows = db_execute("SELECT * FROM kicked").fetchall()
+
+    if not rows:
+        await update.message.reply_text("没有封禁用户")
+        return
+
+    text = "封禁用户列表\n\n"
+
+    for uid, kick_time in rows:
+        kick_time = datetime.fromisoformat(kick_time).astimezone(BEIJING)
+        try:
+            member = await context.bot.get_chat_member(GROUP_ID, uid)
+            name = member.user.full_name
+        except:
+            name = "未知用户"
+
+        text += f"{name} ({uid}) 封禁时间 {kick_time.strftime('%Y-%m-%d %H:%M')}\n"
+
+    await update.message.reply_text(text)
 
 def update_bot():
     try:
@@ -628,6 +652,7 @@ def main():
     app.add_handler(CommandHandler("members", members_list))
     app.add_handler(CommandHandler("trials", trials_list))
     app.add_handler(CommandHandler("update", update_command))
+    app.add_handler(CommandHandler("kicked", kicked_list))
 
     app.job_queue.run_repeating(check_users, 300, first=10)
 
