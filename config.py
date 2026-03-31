@@ -15,7 +15,7 @@ REMIND_HOURS = 3
 DELETE_DELAY = 10
 
 # ================= USDT 支付配置 =================
-USDT_WALLET_ADDRESS = "UQAOgibtq-BaGUJgI5eiK63qIwdza5SSLTMHac-1k4ssBvLa"
+USDT_WALLET_ADDRESS = "TWYctLLCbvavefuCqRXxgKzS7hVe6cpbp9"
 USDT_ORDER_TIMEOUT = 600  # 10分钟 = 600秒
 
 # 套餐配置 (天数, USDT价格)
