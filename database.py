@@ -169,11 +169,21 @@ def extend_member(user_id: int, days: int):
         new_expire = max(old_expire, current) + timedelta(days=days)
     else:
         new_expire = current + timedelta(days=days)
+    
+    # 使用 UPDATE 确保正确更新，并清除试用时间
     db_execute("""
-        INSERT INTO users (user_id, expire_time, is_permanent, trial_start_time)
-        VALUES (?, ?, 0, NULL)
-        ON CONFLICT(user_id) DO UPDATE SET expire_time=excluded.expire_time, is_permanent=0, trial_start_time=NULL, is_banned=0
-    """, (user_id, new_expire.isoformat()))
+        UPDATE users 
+        SET expire_time=?, is_permanent=0, trial_start_time=NULL, is_banned=0
+        WHERE user_id=?
+    """, (new_expire.isoformat(), user_id))
+    
+    # 如果用户不存在，则插入
+    if not row:
+        db_execute("""
+            INSERT OR IGNORE INTO users (user_id, expire_time, is_permanent, trial_start_time, is_banned)
+            VALUES (?, ?, 0, NULL, 0)
+        """, (user_id, new_expire.isoformat()))
+    
     return new_expire
 
 def ban_user(user_id: int, reason: str):
