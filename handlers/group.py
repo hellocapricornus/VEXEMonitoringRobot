@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
@@ -20,7 +21,6 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # 获取所有新加入的成员
     new_members = update.message.new_chat_members
-
     logging.info(f"检测到新成员加入事件，新成员数量: {len(new_members)}")
 
     for member in new_members:
@@ -58,7 +58,6 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         # 未关注频道：只踢出不封禁（用户关注后可以重新加入）
         if not is_following:
-            # 未关注频道：只踢出不封禁
             reason = "未关注频道"
             logging.info(f"用户 {user_id} 未关注频道，准备踢出")
             await kick_user(context, user_id, reason, ban=False)
@@ -82,10 +81,13 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         row = get_user(user_id)
 
         # 调试日志
-        logging.info(f"用户 {user_id} 数据库状态: expire_time={row[0]}, is_permanent={row[1]}, trial_start={row[2]}, is_banned={row[3]}")
+        if row:
+            logging.info(f"用户 {user_id} 数据库状态: expire_time={row[0]}, is_permanent={row[1]}, trial_start={row[2]}, is_banned={row[3]}")
+        else:
+            logging.error(f"用户 {user_id} 数据库记录不存在！")
+            continue
 
-
-        # 4. 检查会员/试用资格
+        # 3. 检查会员/试用资格
         is_valid = False
         reason = ""
 
@@ -118,48 +120,47 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 except:
                     reason = "试用已结束"
             else:
-                reason = "未获得试用资格，请先加入监听群"
-        else:
-            reason = "未获得试用资格，请先加入监听群"
+                reason = "未获得试用资格"
 
-    # 如果有有效资格，直接放行（并确保解封）
-    if is_valid:
-        logging.info(f"用户 {user_id} 有有效资格 ({reason})，允许入群")
-        # 确保 Telegram 解封
-        try:
-            await context.bot.unban_chat_member(GROUP_ID, user_id)
-            logging.info(f"用户 {user_id} 已解封")
-        except:
-            pass
-        # 确保数据库解封
+        # 4. 如果有有效资格，直接放行（并确保解封）
+        if is_valid:
+            logging.info(f"用户 {user_id} 有有效资格 ({reason})，允许入群")
+            # 确保 Telegram 解封
+            try:
+                await context.bot.unban_chat_member(GROUP_ID, user_id)
+                logging.info(f"用户 {user_id} 已解封")
+            except Exception as e:
+                logging.warning(f"解封用户 {user_id} 失败: {e}")
+            # 确保数据库解封
+            if row and row[3] == 1:
+                db_execute("UPDATE users SET is_banned=0 WHERE user_id=?", (user_id,))
+                logging.info(f"用户 {user_id} 数据库已解封")
+            await send_temp(context, f"👋 欢迎 {member.full_name}\n{reason}", GROUP_ID)
+            continue
+
+        # 5. 无有效资格，检查是否被封禁
         if row and row[3] == 1:
-            db_execute("UPDATE users SET is_banned=0 WHERE user_id=?", (user_id,))
-        await send_temp(context, f"👋 欢迎 {member.full_name}\n{reason}", GROUP_ID)
-        continue
+            reason = "您已被封禁"
+            logging.info(f"用户 {user_id} 已被封禁，准备踢出")
+            await kick_user(context, user_id, reason, ban=True)
+            continue
 
-    # 无有效资格，检查是否被封禁
-    if row and row[3] == 1:
-        reason = "您已被封禁"
-        logging.info(f"用户 {user_id} 已被封禁，准备踢出")
-        await kick_user(context, user_id, reason, ban=True)
-        continue
-
-    # 无有效资格且未封禁，踢出并引导
-    logging.info(f"用户 {user_id} 无有效资格 ({reason})，准备踢出")
-    await kick_user(context, user_id, reason, ban=False)
-    try:
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔗 加入监听群获取试用", url=MONITOR_GROUP_LINK)],
-            [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")]
-        ])
-        await context.bot.send_message(
-             user_id,
-            f"❌ 无法加入群组\n原因: {reason}\n\n"
-            f"请通过以下方式获取资格：",
-            reply_markup=keyboard
-        )
-    except Exception as e:
-        logging.warning(f"无法私聊用户 {user_id}: {e}")
+        # 6. 无有效资格且未封禁，踢出并引导
+        logging.info(f"用户 {user_id} 无有效资格 ({reason})，准备踢出")
+        await kick_user(context, user_id, reason, ban=False)
+        try:
+            keyboard = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔗 加入监听群获取试用", url=MONITOR_GROUP_LINK)],
+                [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")]
+            ])
+            await context.bot.send_message(
+                user_id,
+                f"❌ 无法加入群组\n原因: {reason}\n\n"
+                f"请通过以下方式获取资格：",
+                reply_markup=keyboard
+            )
+        except Exception as e:
+            logging.warning(f"无法私聊用户 {user_id}: {e}")
 
 async def left_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """处理成员离开消息"""
