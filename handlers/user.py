@@ -101,22 +101,22 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
 
     if is_admin(user_id):
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 统计", callback_data="admin_stats"),
-         InlineKeyboardButton("➕ 添加临时会员", callback_data="admin_add_trial")],
-        [InlineKeyboardButton("⭐ 添加永久会员", callback_data="admin_add_permanent"),
-         InlineKeyboardButton("⏰ 延长会员时间", callback_data="admin_extend")],
-        [InlineKeyboardButton("👢 踢出用户", callback_data="admin_kick"),
-         InlineKeyboardButton("🔓 解封用户", callback_data="admin_unban")],
-        [InlineKeyboardButton("📋 会员列表", callback_data="admin_members"),
-         InlineKeyboardButton("🧪 试用列表", callback_data="admin_trials"),
-         InlineKeyboardButton("🚫 封禁列表", callback_data="admin_banned")],
-        [InlineKeyboardButton("💎 USDT(待处理)", callback_data="admin_usdt_orders"),
-         InlineKeyboardButton("📜 USDT(历史)", callback_data="admin_usdt_orders_history")],  # 添加这一行
-        [InlineKeyboardButton("💬 回复用户", callback_data="admin_reply")]
-    ])
-    await update.message.reply_text("👑 管理员菜单", reply_markup=keyboard)
-    return
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 统计", callback_data="admin_stats"),
+             InlineKeyboardButton("➕ 添加临时会员", callback_data="admin_add_trial")],
+            [InlineKeyboardButton("⭐ 添加永久会员", callback_data="admin_add_permanent"),
+             InlineKeyboardButton("⏰ 延长会员时间", callback_data="admin_extend")],
+            [InlineKeyboardButton("👢 踢出用户", callback_data="admin_kick"),
+             InlineKeyboardButton("🔓 解封用户", callback_data="admin_unban")],
+            [InlineKeyboardButton("📋 会员列表", callback_data="admin_members"),
+             InlineKeyboardButton("🧪 试用列表", callback_data="admin_trials"),
+             InlineKeyboardButton("🚫 封禁列表", callback_data="admin_banned")],
+            [InlineKeyboardButton("💎 USDT(待处理)", callback_data="admin_usdt_orders"),
+             InlineKeyboardButton("📜 USDT(历史)", callback_data="admin_usdt_orders_history")],  # 添加这一行
+            [InlineKeyboardButton("💬 回复用户", callback_data="admin_reply")]
+        ])
+        await update.message.reply_text("👑 管理员菜单", reply_markup=keyboard)
+        return
 
     await show_channel_guide(update, context, user_id)
 
