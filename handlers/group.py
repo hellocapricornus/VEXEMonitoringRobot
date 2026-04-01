@@ -80,12 +80,19 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # 2. 已关注频道，获取用户数据库记录
         row = get_user(user_id)
 
+        # 如果记录不存在，自动创建
+        if not row:
+            logging.info(f"用户 {user_id} 数据库记录不存在，正在创建...")
+            db_execute("INSERT OR IGNORE INTO users (user_id, is_banned) VALUES (?, 0)", (user_id,))
+            row = get_user(user_id)
+            if row:
+                logging.info(f"用户 {user_id} 记录创建成功")
+            else:
+                logging.error(f"用户 {user_id} 记录创建失败！")
+                continue
+
         # 调试日志
-        if row:
-            logging.info(f"用户 {user_id} 数据库状态: expire_time={row[0]}, is_permanent={row[1]}, trial_start={row[2]}, is_banned={row[3]}")
-        else:
-            logging.error(f"用户 {user_id} 数据库记录不存在！")
-            continue
+        logging.info(f"用户 {user_id} 数据库状态: expire_time={row[0]}, is_permanent={row[1]}, trial_start={row[2]}, is_banned={row[3]}")
 
         # 3. 检查会员/试用资格
         is_valid = False
