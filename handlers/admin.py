@@ -366,17 +366,21 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
             db_execute("UPDATE users SET expire_time=NULL WHERE user_id=?", (uid,))
 
 # ================= USDT 订单管理 =================
+# 注意：clean_expired_orders 函数在 user.py 中定义，这里直接导入使用
+# 不需要重复定义！
 
 async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员查看待处理 USDT 订单"""
     query = update.callback_query
     await query.answer()
 
+    # 从 user.py 导入所需的函数和变量
     from handlers.user import pending_usdt_orders, clean_expired_orders
     from config import USDT_ORDER_TIMEOUT
     import time
 
-    clean_expired_orders()  # 调用全局函数
+    # 调用 user.py 中的清理函数
+    clean_expired_orders()
 
     if not pending_usdt_orders:
         await query.edit_message_text(
@@ -436,7 +440,6 @@ async def admin_usdt_orders_history_callback(update: Update, context: ContextTyp
     for row in rows:
         order_id, user_id, plan_name, amount, status, created_at, paid_at, tx_id = row
 
-        # 状态图标和文字
         status_map = {
             "pending": ("⏳", "待支付"),
             "paid": ("✅", "已支付"),
