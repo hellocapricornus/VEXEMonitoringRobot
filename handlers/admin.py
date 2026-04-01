@@ -298,48 +298,26 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
     logging.info("定时任务执行：检查频道关注、试用到期、会员到期")
 
     # ================= 1. 检查频道关注状态 =================
-    # 获取数据库中的所有用户（有记录的）
     all_users = db_execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
     logging.info(f"数据库中共有 {len(all_users)} 名用户需要检查")
 
-    # 显示所有用户ID
     for (uid,) in all_users:
-        logging.info(f"数据库中的用户: {uid}")
-
-    for (uid,) in all_users:
-        # 跳过管理员
         if check_admin(uid):
-            logging.info(f"用户 {uid} 是管理员，跳过检查")
             continue
 
-        # 检查用户是否还在群组中
         try:
             member = await context.bot.get_chat_member(GROUP_ID, uid)
             if member.status not in ["member", "administrator", "creator"]:
-                logging.info(f"用户 {uid} 不在群组中，从数据库删除")
                 db_execute("DELETE FROM users WHERE user_id=?", (uid,))
                 continue
-        except Exception as e:
-            logging.info(f"用户 {uid} 不在群组中，从数据库删除: {e}")
+        except:
             db_execute("DELETE FROM users WHERE user_id=?", (uid,))
             continue
 
-        # 检查用户是否关注频道
         is_following = await is_user_following_channel(context, uid)
-        logging.info(f"用户 {uid} 频道关注状态: {is_following}")
-
         if not is_following:
             logging.info(f"用户 {uid} 未关注频道，准备踢出群组")
             await kick_user(context, uid, "您未关注频道，请重新关注后加入")
-            try:
-                await context.bot.send_message(
-                    uid,
-                    f"❌ 您未关注我们的频道，无法继续留在群组。\n\n"
-                    f"请重新关注频道后，再次申请加入群组。\n\n"
-                    f"👉 {CHANNEL_LINK}"
-                )
-            except Exception as e:
-                logging.warning(f"无法私聊用户 {uid}: {e}")
 
     # ================= 2. 检查试用到期 =================
     trials = db_execute("SELECT user_id, trial_start_time, trial_reminded FROM users WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0").fetchall()
@@ -357,7 +335,8 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
                 pass
             db_execute("UPDATE users SET trial_reminded=1 WHERE user_id=?", (uid,))
 
-        # ================= 3. 检查会员到期 =================
+    # ================= 3. 检查会员到期 =================
+    # 注意：这个 for 循环必须与上面的 for 循环同级，不能嵌套在里面
     members = db_execute("SELECT user_id, expire_time FROM users WHERE expire_time IS NOT NULL AND is_permanent=0").fetchall()
     for uid, exp in members:
         expire = datetime.fromisoformat(exp)
@@ -365,11 +344,6 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
             logging.info(f"用户 {uid} 会员到期，踢出群组")
             await kick_user(context, uid, "会员到期")
             db_execute("UPDATE users SET expire_time=NULL WHERE user_id=?", (uid,))
-    # 函数结束的闭合括号在这里
-
-# ================= USDT 订单管理 =================
-# 注意：clean_expired_orders 函数在 user.py 中定义，这里直接导入使用
-# 不需要重复定义！
 
 async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员查看待处理 USDT 订单"""
