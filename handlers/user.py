@@ -614,11 +614,22 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def clean_expired_orders():
     """清理超时订单"""
+    from config import USDT_ORDER_TIMEOUT
+    import time
+    import logging
+    
     current_time = time.time()
     expired_keys = []
     for amount_key, order in pending_usdt_orders.items():
         if current_time - order["created_at"] > USDT_ORDER_TIMEOUT:
             expired_keys.append(amount_key)
+            # 更新数据库中的订单状态为 expired
+            from database import db_execute
+            db_execute("""
+                UPDATE usdt_orders 
+                SET status='expired' 
+                WHERE order_id=? AND status='pending'
+            """, (order["order_id"],))
     for key in expired_keys:
         del pending_usdt_orders[key]
         logging.info(f"清理过期订单: {key}")
