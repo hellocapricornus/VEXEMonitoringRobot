@@ -367,35 +367,12 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
 
 # ================= USDT 订单管理 =================
 
-def clean_expired_orders():
-    """清理超时订单（全局函数）"""
-    from handlers.user import pending_usdt_orders
-    from config import USDT_ORDER_TIMEOUT
-    from database import db_execute
-    import time
-    import logging
-    
-    current_time = time.time()
-    expired_keys = []
-    for amount_key, order in list(pending_usdt_orders.items()):
-        if current_time - order["created_at"] > USDT_ORDER_TIMEOUT:
-            expired_keys.append(amount_key)
-            # 更新数据库中的订单状态为 expired
-            db_execute("""
-                UPDATE usdt_orders 
-                SET status='expired' 
-                WHERE order_id=? AND status='pending'
-            """, (order["order_id"],))
-    for key in expired_keys:
-        del pending_usdt_orders[key]
-        logging.info(f"清理过期订单: {key}")
-
 async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员查看待处理 USDT 订单"""
     query = update.callback_query
     await query.answer()
 
-    from handlers.user import pending_usdt_orders
+    from handlers.user import pending_usdt_orders, clean_expired_orders
     from config import USDT_ORDER_TIMEOUT
     import time
 
