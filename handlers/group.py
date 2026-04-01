@@ -132,12 +132,15 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # 4. 如果有有效资格，直接放行（并确保解封）
         if is_valid:
             logging.info(f"用户 {user_id} 有有效资格 ({reason})，允许入群")
-            # 确保 Telegram 解封
-            try:
-                await context.bot.unban_chat_member(GROUP_ID, user_id)
-                logging.info(f"用户 {user_id} 已解封")
-            except Exception as e:
-                logging.warning(f"解封用户 {user_id} 失败: {e}")
+            # 确保 Telegram 解封（重试3次）
+            for retry in range(3):
+                try:
+                    await context.bot.unban_chat_member(GROUP_ID, user_id)
+                    logging.info(f"用户 {user_id} 已解封 (尝试 {retry+1})")
+                    break
+                except Exception as e:
+                    logging.warning(f"解封用户 {user_id} 失败 (尝试 {retry+1}): {e}")
+                    await asyncio.sleep(1)
             # 确保数据库解封
             if row and row[3] == 1:
                 db_execute("UPDATE users SET is_banned=0 WHERE user_id=?", (user_id,))
