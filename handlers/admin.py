@@ -404,23 +404,6 @@ async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAU
             [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
         ])
     )
-    
-    def clean_expired_orders():
-        """清理超时订单"""
-        current_time = time.time()
-        expired_keys = []
-        for amount_key, order in pending_usdt_orders.items():
-            if current_time - order["created_at"] > USDT_ORDER_TIMEOUT:
-                expired_keys.append(amount_key)
-                # 更新数据库中的订单状态为 expired
-                db_execute("""
-                    UPDATE usdt_orders 
-                    SET status='expired' 
-                    WHERE order_id=? AND status='pending'
-                """, (order["order_id"],))
-        for key in expired_keys:
-            del pending_usdt_orders[key]
-            logging.info(f"清理过期订单: {key}")
 
 async def admin_usdt_orders_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员查看 USDT 订单历史"""
