@@ -25,13 +25,8 @@ async def kick_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, reason: st
     Args:
         ban: True=封禁（禁止重新加入），False=只踢出不封禁
     """
-    from database import ban_user, db_execute
-    
+    from database import ban_user
     try:
-        # 确保用户在 users 表中有记录（重要！）
-        db_execute("INSERT OR IGNORE INTO users (user_id, is_banned) VALUES (?, 0)", (user_id,))
-        logging.info(f"确保用户 {user_id} 在 users 表中存在")
-        
         if ban:
             # 封禁用户（禁止重新加入）
             await context.bot.ban_chat_member(GROUP_ID, user_id)
