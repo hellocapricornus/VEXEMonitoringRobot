@@ -1,9 +1,10 @@
+import asyncio
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import GROUP_ID, ADMIN_ID, CHANNEL_LINK
 from database import is_admin, add_trial, add_permanent, extend_member, ban_user, unban_user, get_user, db_execute, now, save_message
 from utils import kick_user, is_user_following_channel
-import logging
 
 async def cmd_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -356,7 +357,7 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
                 pass
             db_execute("UPDATE users SET trial_reminded=1 WHERE user_id=?", (uid,))
 
-    # ================= 3. 检查会员到期 =================
+        # ================= 3. 检查会员到期 =================
     members = db_execute("SELECT user_id, expire_time FROM users WHERE expire_time IS NOT NULL AND is_permanent=0").fetchall()
     for uid, exp in members:
         expire = datetime.fromisoformat(exp)
@@ -364,6 +365,7 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
             logging.info(f"用户 {uid} 会员到期，踢出群组")
             await kick_user(context, uid, "会员到期")
             db_execute("UPDATE users SET expire_time=NULL WHERE user_id=?", (uid,))
+    # 函数结束的闭合括号在这里
 
 # ================= USDT 订单管理 =================
 # 注意：clean_expired_orders 函数在 user.py 中定义，这里直接导入使用
