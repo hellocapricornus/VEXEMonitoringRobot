@@ -1,10 +1,9 @@
-import asyncio
-import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from config import GROUP_ID, ADMIN_ID, CHANNEL_LINK
 from database import is_admin, add_trial, add_permanent, extend_member, ban_user, unban_user, get_user, db_execute, now, save_message
 from utils import kick_user, is_user_following_channel
+import logging
 
 async def cmd_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -298,26 +297,48 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
     logging.info("定时任务执行：检查频道关注、试用到期、会员到期")
 
     # ================= 1. 检查频道关注状态 =================
+    # 获取数据库中的所有用户（有记录的）
     all_users = db_execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
     logging.info(f"数据库中共有 {len(all_users)} 名用户需要检查")
 
+    # 显示所有用户ID
     for (uid,) in all_users:
+        logging.info(f"数据库中的用户: {uid}")
+
+    for (uid,) in all_users:
+        # 跳过管理员
         if check_admin(uid):
+            logging.info(f"用户 {uid} 是管理员，跳过检查")
             continue
 
+        # 检查用户是否还在群组中
         try:
             member = await context.bot.get_chat_member(GROUP_ID, uid)
             if member.status not in ["member", "administrator", "creator"]:
+                logging.info(f"用户 {uid} 不在群组中，从数据库删除")
                 db_execute("DELETE FROM users WHERE user_id=?", (uid,))
                 continue
-        except:
+        except Exception as e:
+            logging.info(f"用户 {uid} 不在群组中，从数据库删除: {e}")
             db_execute("DELETE FROM users WHERE user_id=?", (uid,))
             continue
 
+        # 检查用户是否关注频道
         is_following = await is_user_following_channel(context, uid)
+        logging.info(f"用户 {uid} 频道关注状态: {is_following}")
+
         if not is_following:
             logging.info(f"用户 {uid} 未关注频道，准备踢出群组")
             await kick_user(context, uid, "您未关注频道，请重新关注后加入")
+            try:
+                await context.bot.send_message(
+                    uid,
+                    f"❌ 您未关注我们的频道，无法继续留在群组。\n\n"
+                    f"请重新关注频道后，再次申请加入群组。\n\n"
+                    f"👉 {CHANNEL_LINK}"
+                )
+            except Exception as e:
+                logging.warning(f"无法私聊用户 {uid}: {e}")
 
     # ================= 2. 检查试用到期 =================
     trials = db_execute("SELECT user_id, trial_start_time, trial_reminded FROM users WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0").fetchall()
@@ -336,7 +357,6 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
             db_execute("UPDATE users SET trial_reminded=1 WHERE user_id=?", (uid,))
 
     # ================= 3. 检查会员到期 =================
-    # 注意：这个 for 循环必须与上面的 for 循环同级，不能嵌套在里面
     members = db_execute("SELECT user_id, expire_time FROM users WHERE expire_time IS NOT NULL AND is_permanent=0").fetchall()
     for uid, exp in members:
         expire = datetime.fromisoformat(exp)
@@ -350,12 +370,10 @@ async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAU
     query = update.callback_query
     await query.answer()
 
-    # 从 user.py 导入所需的函数和变量
     from handlers.user import pending_usdt_orders, clean_expired_orders
     from config import USDT_ORDER_TIMEOUT
     import time
 
-    # 调用 user.py 中的清理函数
     clean_expired_orders()
 
     if not pending_usdt_orders:
@@ -386,6 +404,23 @@ async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAU
             [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
         ])
     )
+    
+    def clean_expired_orders():
+        """清理超时订单"""
+        current_time = time.time()
+        expired_keys = []
+        for amount_key, order in pending_usdt_orders.items():
+            if current_time - order["created_at"] > USDT_ORDER_TIMEOUT:
+                expired_keys.append(amount_key)
+                # 更新数据库中的订单状态为 expired
+                db_execute("""
+                    UPDATE usdt_orders 
+                    SET status='expired' 
+                    WHERE order_id=? AND status='pending'
+                """, (order["order_id"],))
+        for key in expired_keys:
+            del pending_usdt_orders[key]
+            logging.info(f"清理过期订单: {key}")
 
 async def admin_usdt_orders_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员查看 USDT 订单历史"""
@@ -416,6 +451,7 @@ async def admin_usdt_orders_history_callback(update: Update, context: ContextTyp
     for row in rows:
         order_id, user_id, plan_name, amount, status, created_at, paid_at, tx_id = row
 
+        # 状态图标和文字
         status_map = {
             "pending": ("⏳", "待支付"),
             "paid": ("✅", "已支付"),
