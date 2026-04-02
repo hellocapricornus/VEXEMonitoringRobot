@@ -146,21 +146,20 @@ def has_valid_membership(user_id: int) -> bool:
     return is_valid
 
 def add_trial(user_id: int):
+    """添加试用资格 - 同时清除封禁标记"""
     db_execute("""
-        INSERT INTO users (user_id, trial_start_time, trial_reminded)
-        VALUES (?, ?, 0)
-        ON CONFLICT(user_id) DO UPDATE SET trial_start_time=excluded.trial_start_time, 
-                  expire_time=NULL, is_permanent=0, is_banned=0
+        INSERT INTO users (user_id, trial_start_time, trial_reminded, is_banned)
+        VALUES (?, ?, 0, 0)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            trial_start_time=excluded.trial_start_time, 
+            expire_time=NULL, 
+            is_permanent=0, 
+            is_banned=0,
+            trial_reminded=0
     """, (user_id, now().isoformat()))
 
-def add_permanent(user_id: int):
-    db_execute("""
-        INSERT INTO users (user_id, is_permanent, expire_time, trial_start_time)
-        VALUES (?, 1, NULL, NULL)
-        ON CONFLICT(user_id) DO UPDATE SET is_permanent=1, expire_time=NULL, trial_start_time=NULL, is_banned=0
-    """, (user_id,))
-
 def extend_member(user_id: int, days: int):
+    """延长会员时间 - 同时清除封禁标记"""
     from datetime import timedelta
     row = db_execute("SELECT expire_time FROM users WHERE user_id=?", (user_id,)).fetchone()
     current = now()
@@ -170,11 +169,32 @@ def extend_member(user_id: int, days: int):
     else:
         new_expire = current + timedelta(days=days)
     db_execute("""
-        INSERT INTO users (user_id, expire_time, is_permanent, trial_start_time)
-        VALUES (?, ?, 0, NULL)
-        ON CONFLICT(user_id) DO UPDATE SET expire_time=excluded.expire_time, is_permanent=0, trial_start_time=NULL, is_banned=0
+        INSERT INTO users (user_id, expire_time, is_permanent, trial_start_time, is_banned)
+        VALUES (?, ?, 0, NULL, 0)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            expire_time=excluded.expire_time, 
+            is_permanent=0, 
+            trial_start_time=NULL, 
+            is_banned=0
     """, (user_id, new_expire.isoformat()))
     return new_expire
+
+def add_permanent(user_id: int):
+    """添加永久会员 - 同时清除封禁标记"""
+    db_execute("""
+        INSERT INTO users (user_id, is_permanent, expire_time, trial_start_time, is_banned)
+        VALUES (?, 1, NULL, NULL, 0)
+        ON CONFLICT(user_id) DO UPDATE SET 
+            is_permanent=1, 
+            expire_time=NULL, 
+            trial_start_time=NULL, 
+            is_banned=0
+    """, (user_id,))
+
+def unban_user(user_id: int):
+    """解封用户 - 同时解封群组"""
+    db_execute("UPDATE users SET is_banned=0 WHERE user_id=?", (user_id,))
+    db_execute("DELETE FROM banned WHERE user_id=?", (user_id,))
 
 def ban_user(user_id: int, reason: str):
     db_execute("UPDATE users SET is_banned=1 WHERE user_id=?", (user_id,))
