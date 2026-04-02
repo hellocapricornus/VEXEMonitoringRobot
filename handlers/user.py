@@ -681,8 +681,18 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
     result = await check_usdt_transaction(order["amount"])
 
     if result["success"]:
-        new_expire = extend_member(user_id, order["days"])
+        # 1. 先解封用户（数据库）
         unban_user(user_id)
+        
+        # 2. 延长会员时间
+        new_expire = extend_member(user_id, order["days"])
+        
+        # 3. 解封群组中的用户
+        try:
+            await context.bot.unban_chat_member(GROUP_ID, user_id)
+            logging.info(f"USDT支付后解封用户 {user_id}")
+        except Exception as e:
+            logging.warning(f"解封用户 {user_id} 失败: {e}")
 
         # 更新数据库中的订单状态为 paid
         db_execute("""
@@ -693,12 +703,6 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
 
         # 标记交易已处理
         mark_transaction_processed(result["tx_id"], user_id, order["days"])
-
-        # 解封群组
-        try:
-            await context.bot.unban_chat_member(GROUP_ID, user_id)
-        except:
-            pass
 
         # 删除内存中的订单
         del pending_usdt_orders[amount_key]
