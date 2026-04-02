@@ -18,33 +18,17 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     except Exception as e:
         logging.warning(f"删除系统消息失败: {e}")
 
-    # 获取所有新加入的成员
     new_members = update.message.new_chat_members
-
     logging.info(f"检测到新成员加入事件，新成员数量: {len(new_members)}")
 
     for member in new_members:
         user_id = member.id
 
-        # 如果是机器人自己，跳过
         if user_id == context.bot.id:
             logging.info("机器人自己加入，跳过")
             continue
 
         logging.info(f"处理新成员: {member.full_name} (ID: {user_id})")
-
-        # 确保用户在数据库中有记录
-        db_execute("""
-            INSERT OR IGNORE INTO users (user_id, is_banned)
-            VALUES (?, 0)
-        """, (user_id,))
-
-        # 验证是否插入成功
-        check_row = db_execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)).fetchone()
-        if check_row:
-            logging.info(f"用户 {user_id} 已成功记录到数据库")
-        else:
-            logging.error(f"用户 {user_id} 记录到数据库失败！")
 
         # 管理员直接放行
         if is_admin(user_id):
@@ -52,15 +36,13 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await send_temp(context, f"👋 欢迎管理员 {member.full_name}", GROUP_ID)
             continue
 
-        # 1. 首先检查频道关注状态（所有非管理员用户都必须关注频道）
+        # 1. 首先检查频道关注状态
         is_following = await is_user_following_channel(context, user_id)
         logging.info(f"用户 {user_id} 频道关注状态: {is_following}")
 
-        # 未关注频道：只踢出不封禁（用户关注后可以重新加入）
         if not is_following:
-            # 未关注频道：只踢出不封禁
             reason = "未关注频道"
-            logging.info(f"用户 {user_id} 未关注频道，准备踢出")
+            logging.info(f"用户 {user_id} 未关注频道，准备踢出（不封禁）")
             await kick_user(context, user_id, reason, ban=False)
             try:
                 keyboard = InlineKeyboardMarkup([
@@ -78,69 +60,48 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 logging.warning(f"无法私聊用户 {user_id}: {e}")
             continue
 
-        # 2. 已关注频道，获取用户数据库记录
-        row = get_user(user_id)
+        # 2. 确保用户在数据库中有记录
+        db_execute("""
+            INSERT OR IGNORE INTO users (user_id, is_banned)
+            VALUES (?, 0)
+        """, (user_id,))
 
-        # 3. 检查用户是否被封禁
-        if row and row[3] == 1:  # is_banned
-            reason = "您已被封禁"
-            logging.info(f"用户 {user_id} 已被封禁，准备踢出")
+        # 3. 获取用户状态
+        row = get_user(user_id)
+        is_valid, status = get_user_status(user_id)
+
+        # 4. 检查用户是否被封禁（双重检查）
+        if row and row[3] == 1:
+            reason = "您已被封禁，请联系管理员"
+            logging.info(f"用户 {user_id} 已被封禁 (is_banned={row[3]})，准备踢出")
             await kick_user(context, user_id, reason, ban=True)
             continue
 
-        # 4. 检查会员/试用资格
-        is_valid = False
-        reason = ""
-
-        if row:
-            # 永久会员
-            if row[1] == 1:
-                is_valid = True
-                reason = "永久会员"
-            # 付费会员（未过期）
-            elif row[0]:
-                try:
-                    expire = datetime.fromisoformat(row[0]).astimezone(BEIJING)
-                    if expire > now():
-                        is_valid = True
-                        reason = f"会员到期 {expire.strftime('%Y-%m-%d %H:%M')}"
-                    else:
-                        reason = "会员已过期，请续费"
-                except:
-                    reason = "会员已过期"
-            # 试用用户（未过期）
-            elif row[2]:
-                try:
-                    trial_start = datetime.fromisoformat(row[2]).astimezone(BEIJING)
-                    trial_end = trial_start + timedelta(hours=TRIAL_HOURS)
-                    if trial_end > now():
-                        is_valid = True
-                        reason = f"试用剩余 {(trial_end-now()).seconds//3600} 小时"
-                    else:
-                        reason = "试用已结束，请购买会员"
-                except:
-                    reason = "试用已结束"
-            else:
-                reason = "未获得试用资格，请先加入监听群"
-        else:
-            reason = "未获得试用资格，请先加入监听群"
-
         if is_valid:
-            # 有有效资格，发送欢迎消息
-            logging.info(f"用户 {user_id} 有有效资格 ({reason})，允许入群")
-            await send_temp(context, f"👋 欢迎 {member.full_name}\n{reason}", GROUP_ID)
+            # 有有效资格，发送欢迎消息并确保解封
+            logging.info(f"用户 {user_id} 有有效资格 ({status})，允许入群")
+            
+            # 确保用户没有被封禁（解封）
+            if row and row[3] == 1:
+                unban_user(user_id)
+                try:
+                    await context.bot.unban_chat_member(GROUP_ID, user_id)
+                except:
+                    pass
+            
+            await send_temp(context, f"👋 欢迎 {member.full_name}\n{status}", GROUP_ID)
         else:
-            # 无有效资格，踢出并引导
-            logging.info(f"用户 {user_id} 无有效资格 ({reason})，准备踢出")
-            await kick_user(context, user_id, reason, ban=True)
+            # 无有效资格，踢出并封禁
+            logging.info(f"用户 {user_id} 无有效资格 ({status})，准备踢出并封禁")
+            await kick_user(context, user_id, status, ban=True)
             try:
                 keyboard = InlineKeyboardMarkup([
                     [InlineKeyboardButton("🔗 加入监听群获取试用", url=MONITOR_GROUP_LINK)],
-                    [InlineKeyboardButton("💰 购买会员", callback_data="user_buy")]
+                    [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")]
                 ])
                 await context.bot.send_message(
                     user_id,
-                    f"❌ 无法加入群组\n原因: {reason}\n\n"
+                    f"❌ 无法加入群组\n原因: {status}\n\n"
                     f"请通过以下方式获取资格：",
                     reply_markup=keyboard
                 )
