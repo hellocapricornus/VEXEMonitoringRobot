@@ -25,7 +25,7 @@ async def kick_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, reason: st
     Args:
         ban: True=封禁（禁止重新加入），False=只踢出不封禁
     """
-    from database import ban_user
+    from database import ban_user, unban_user
     try:
         if ban:
             # 封禁用户（禁止重新加入）
@@ -37,6 +37,12 @@ async def kick_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, reason: st
             # 只踢出不封禁（先封禁再立即解封）
             await context.bot.ban_chat_member(GROUP_ID, user_id)
             await context.bot.unban_chat_member(GROUP_ID, user_id)
+            # ⚠️ 只踢出不封禁时，不要设置数据库的 is_banned=1
+            # 但需要确保数据库记录存在且 is_banned=0
+            db_execute("""
+                INSERT OR IGNORE INTO users (user_id, is_banned) 
+                VALUES (?, 0)
+            """, (user_id,))
             logging.info(f"已踢出用户 {user_id}（未封禁）")
 
         # 尝试私聊通知
