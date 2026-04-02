@@ -12,16 +12,18 @@ async def cmd_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("用法: /add_trial 用户ID")
         return
     uid = int(context.args[0])
-    add_trial(uid)
-
-    # 添加试用资格后，解封用户
+    
+    # 1. 先解封群组中的用户
     try:
         await context.bot.unban_chat_member(GROUP_ID, uid)
-        logging.info(f"用户 {uid} 获得试用资格，已解封")
+        logging.info(f"用户 {uid} 已从群组解封")
     except Exception as e:
-        logging.warning(f"解封用户 {uid} 失败: {e}")
-
-    await update.message.reply_text(f"已为用户 {uid} 添加24小时试用")
+        logging.warning(f"解封用户 {uid} 失败（可能不在封禁列表）: {e}")
+    
+    # 2. 添加试用资格（这会清除数据库中的 is_banned）
+    add_trial(uid)
+    
+    await update.message.reply_text(f"✅ 已为用户 {uid} 添加24小时试用并解封")
 
 async def cmd_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -30,16 +32,17 @@ async def cmd_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("用法: /add_permanent 用户ID")
         return
     uid = int(context.args[0])
-    add_permanent(uid)
-
-    # 添加永久会员后，解封用户
+    
+    # 1. 先解封群组
     try:
         await context.bot.unban_chat_member(GROUP_ID, uid)
-        logging.info(f"用户 {uid} 获得永久会员，已解封")
-    except Exception as e:
-        logging.warning(f"解封用户 {uid} 失败: {e}")
-
-    await update.message.reply_text(f"已将用户 {uid} 设为永久会员")
+    except:
+        pass
+    
+    # 2. 添加永久会员
+    add_permanent(uid)
+    
+    await update.message.reply_text(f"✅ 已将用户 {uid} 设为永久会员并解封")
 
 async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -48,16 +51,17 @@ async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("用法: /extend 用户ID 天数")
         return
     uid, days = int(context.args[0]), int(context.args[1])
-    new_expire = extend_member(uid, days)
-
-    # 延长会员后，解封用户
+    
+    # 1. 先解封群组
     try:
         await context.bot.unban_chat_member(GROUP_ID, uid)
-        logging.info(f"用户 {uid} 会员已延长，已解封")
-    except Exception as e:
-        logging.warning(f"解封用户 {uid} 失败: {e}")
-
-    await update.message.reply_text(f"已为用户 {uid} 延长 {days} 天，新到期时间: {new_expire.strftime('%Y-%m-%d')}")
+    except:
+        pass
+    
+    # 2. 延长会员时间
+    new_expire = extend_member(uid, days)
+    
+    await update.message.reply_text(f"✅ 已为用户 {uid} 延长 {days} 天，新到期时间: {new_expire.strftime('%Y-%m-%d')}，已解封")
 
 async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -297,39 +301,24 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
     logging.info("定时任务执行：检查频道关注、试用到期、会员到期")
 
     # ================= 1. 检查频道关注状态 =================
-    # 获取数据库中的所有用户（有记录的）
     all_users = db_execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
-    logging.info(f"数据库中共有 {len(all_users)} 名用户需要检查")
-
-    # 显示所有用户ID
+    
     for (uid,) in all_users:
-        logging.info(f"数据库中的用户: {uid}")
-
-    for (uid,) in all_users:
-        # 跳过管理员
         if check_admin(uid):
-            logging.info(f"用户 {uid} 是管理员，跳过检查")
             continue
 
-        # 检查用户是否还在群组中
         try:
             member = await context.bot.get_chat_member(GROUP_ID, uid)
             if member.status not in ["member", "administrator", "creator"]:
-                logging.info(f"用户 {uid} 不在群组中，从数据库删除")
                 db_execute("DELETE FROM users WHERE user_id=?", (uid,))
                 continue
         except Exception as e:
-            logging.info(f"用户 {uid} 不在群组中，从数据库删除: {e}")
             db_execute("DELETE FROM users WHERE user_id=?", (uid,))
             continue
 
-        # 检查用户是否关注频道
         is_following = await is_user_following_channel(context, uid)
-        logging.info(f"用户 {uid} 频道关注状态: {is_following}")
-
         if not is_following:
-            logging.info(f"用户 {uid} 未关注频道，准备踢出群组")
-            await kick_user(context, uid, "您未关注频道，请重新关注后加入")
+            await kick_user(context, uid, "您未关注频道，请重新关注后加入", ban=False)  # 只踢出不封禁
             try:
                 await context.bot.send_message(
                     uid,
@@ -337,18 +326,18 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
                     f"请重新关注频道后，再次申请加入群组。\n\n"
                     f"👉 {CHANNEL_LINK}"
                 )
-            except Exception as e:
-                logging.warning(f"无法私聊用户 {uid}: {e}")
+            except:
+                pass
 
     # ================= 2. 检查试用到期 =================
-    trials = db_execute("SELECT user_id, trial_start_time, trial_reminded FROM users WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0").fetchall()
+    trials = db_execute("SELECT user_id, trial_start_time, trial_reminded FROM users WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0 AND is_banned=0").fetchall()
     for uid, start, reminded in trials:
         start_time = datetime.fromisoformat(start)
         end_time = start_time + timedelta(hours=TRIAL_HOURS)
         if current >= end_time:
             logging.info(f"用户 {uid} 试用到期，踢出群组")
-            await kick_user(context, uid, "试用到期")
-            db_execute("UPDATE users SET trial_start_time=NULL WHERE user_id=?", (uid,))
+            await kick_user(context, uid, "试用到期", ban=True)  # 试用到期封禁
+            db_execute("UPDATE users SET trial_start_time=NULL, is_banned=1 WHERE user_id=?", (uid,))
         elif (end_time - current) <= timedelta(hours=REMIND_HOURS) and reminded == 0:
             try:
                 await context.bot.send_message(uid, f"⏰ 您的试用剩余 {REMIND_HOURS} 小时，请购买会员以继续使用。")
@@ -357,13 +346,13 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
             db_execute("UPDATE users SET trial_reminded=1 WHERE user_id=?", (uid,))
 
     # ================= 3. 检查会员到期 =================
-    members = db_execute("SELECT user_id, expire_time FROM users WHERE expire_time IS NOT NULL AND is_permanent=0").fetchall()
+    members = db_execute("SELECT user_id, expire_time FROM users WHERE expire_time IS NOT NULL AND is_permanent=0 AND is_banned=0").fetchall()
     for uid, exp in members:
         expire = datetime.fromisoformat(exp)
         if current >= expire:
             logging.info(f"用户 {uid} 会员到期，踢出群组")
-            await kick_user(context, uid, "会员到期")
-            db_execute("UPDATE users SET expire_time=NULL WHERE user_id=?", (uid,))
+            await kick_user(context, uid, "会员到期", ban=True)
+            db_execute("UPDATE users SET expire_time=NULL, is_banned=1 WHERE user_id=?", (uid,))
 
 async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """管理员查看待处理 USDT 订单"""
