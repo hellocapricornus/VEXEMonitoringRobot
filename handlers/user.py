@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import random
 import time
@@ -13,14 +14,14 @@ from config import (
     TRIAL_HOURS, CHANNEL_LINK, MONITOR_GROUP_LINK, ADMIN_ID, GROUP_ID,
     USDT_WALLET_ADDRESS, USDT_ORDER_TIMEOUT, USDT_PLANS
 )
-from database import now, BEIJING, get_user, get_user_status, is_admin, is_user_following_channel, has_valid_membership, save_message, extend_member, unban_user, db_execute
+from database import now, BEIJING, get_user, get_user_status, is_admin, is_user_following_channel, has_valid_membership, save_message, extend_member, unban_user, db_execute, add_trial
 from utils import send_temp
 
 async def show_user_menu(update: Update, status: str, in_group: bool = True):
     """显示用户菜单"""
     keyboard = [
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
-        [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],  # 改为 USDT 支付
+        [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
     ]
 
@@ -33,7 +34,7 @@ async def show_user_menu(update: Update, status: str, in_group: bool = True):
     )
 
 async def show_channel_guide(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """显示频道关注引导"""
+    """显示频道关注引导 - 修复：自动添加试用资格"""
     is_following = await is_user_following_channel(context, user_id)
 
     logging.info(f"用户 {user_id} 频道关注状态: {is_following}")
@@ -52,24 +53,22 @@ async def show_channel_guide(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
-    # 已关注频道 -> 检查用户资格状态
+    # 已关注频道 -> 检查并自动添加试用资格
+    row = get_user(user_id)
     is_valid, status = get_user_status(user_id)
 
-    # 根据状态设置不同的提示文字
-    if is_valid:
+    # 关键修复：如果用户没有试用资格且不是会员，自动添加试用
+    if not is_valid and (not row or not row[2]):
+        add_trial(user_id)
+        logging.info(f"用户 {user_id} 完成频道关注，自动添加24小时试用")
+        status_text = "🧪 您已获得24小时免费试用资格！"
+    else:
         if "试用" in status:
             status_text = f"🧪 {status}"
         elif "会员" in status:
             status_text = f"💎 {status}"
         else:
             status_text = f"✅ {status}"
-    else:
-        if "试用已结束" in status:
-            status_text = "⏰ 您的试用期已结束，请购买会员后继续使用。"
-        elif "会员已过期" in status:
-            status_text = "⚠️ 您的会员已过期，请续费后继续使用。"
-        else:
-            status_text = f"❌ {status}"
 
     # 检查用户是否在群组中
     try:
@@ -82,7 +81,7 @@ async def show_channel_guide(update: Update, context: ContextTypes.DEFAULT_TYPE,
     keyboard = [
         [InlineKeyboardButton("🔗 加入群组", url=MONITOR_GROUP_LINK)],
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
-        [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],  # 改为 USDT 支付
+        [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
     ]
 
@@ -112,15 +111,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
              InlineKeyboardButton("🧪 试用列表", callback_data="admin_trials"),
              InlineKeyboardButton("🚫 封禁列表", callback_data="admin_banned")],
             [InlineKeyboardButton("💎 USDT(待处理)", callback_data="admin_usdt_orders"),
-             InlineKeyboardButton("📜 USDT(历史)", callback_data="admin_usdt_orders_history")],  # 添加这一行
-            [InlineKeyboardButton("💬 回复用户", callback_data="admin_reply")]
+             InlineKeyboardButton("📜 USDT(历史)", callback_data="admin_usdt_orders_history")],
+            [InlineKeyboardButton("💬 回复用户", callback_data="admin_reply"),
+             InlineKeyboardButton("📢 广播消息", callback_data="admin_broadcast")]
         ])
         await update.message.reply_text("👑 管理员菜单", reply_markup=keyboard)
         return
 
     await show_channel_guide(update, context, user_id)
 
-# ================= 联系管理员（保持不变）=================
+# ================= 联系管理员 =================
 async def contact_admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """用户联系管理员"""
     query = update.callback_query
@@ -270,7 +270,7 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ================= 用户回调 =================
 async def check_follow_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """检查用户是否真的关注了频道"""
+    """检查用户是否真的关注了频道 - 修复：自动添加试用资格"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -291,22 +291,21 @@ async def check_follow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
+    # 关键修复：检查并自动添加试用资格
+    row = get_user(user_id)
     is_valid, status = get_user_status(user_id)
 
-    if is_valid:
+    if not is_valid and (not row or not row[2]):
+        add_trial(user_id)
+        logging.info(f"用户 {user_id} 完成频道关注，自动添加24小时试用")
+        status_text = "🧪 您已获得24小时免费试用资格！"
+    else:
         if "试用" in status:
             status_text = f"🧪 {status}"
         elif "会员" in status:
             status_text = f"💎 {status}"
         else:
             status_text = f"✅ {status}"
-    else:
-        if "试用已结束" in status:
-            status_text = "⏰ 您的试用期已结束，请购买会员后继续使用。"
-        elif "会员已过期" in status:
-            status_text = "⚠️ 您的会员已过期，请续费后继续使用。"
-        else:
-            status_text = f"❌ {status}"
 
     try:
         member = await context.bot.get_chat_member(GROUP_ID, user_id)
@@ -389,7 +388,7 @@ async def user_query_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=keyboard)
 
 async def back_to_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """返回用户菜单"""
+    """返回用户菜单 - 修复：确保有试用资格"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -409,22 +408,20 @@ async def back_to_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # 确保用户有试用资格
+    row = get_user(user_id)
     is_valid, status = get_user_status(user_id)
 
-    if is_valid:
+    if not is_valid and (not row or not row[2]):
+        add_trial(user_id)
+        status_text = "🧪 您已获得24小时免费试用资格！"
+    else:
         if "试用" in status:
             status_text = f"🧪 {status}"
         elif "会员" in status:
             status_text = f"💎 {status}"
         else:
             status_text = f"✅ {status}"
-    else:
-        if "试用已结束" in status:
-            status_text = "⏰ 您的试用期已结束，请购买会员后继续使用。"
-        elif "会员已过期" in status:
-            status_text = "⚠️ 您的会员已过期，请续费后继续使用。"
-        else:
-            status_text = f"❌ {status}"
 
     keyboard = [
         [InlineKeyboardButton("🔗 加入群组", url=MONITOR_GROUP_LINK)],
@@ -449,12 +446,12 @@ async def restart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 pending_usdt_orders = {}
 
-async def check_usdt_transaction(amount: float) -> dict:
-    """通过 TronGrid API 查询 USDT 交易是否到账"""
+async def check_usdt_transaction(amount: float, retry_count: int = 0) -> dict:
+    """通过 TronGrid API 查询 USDT 交易是否到账 - 增加重试机制"""
     try:
         url = f"https://api.trongrid.io/v1/accounts/{USDT_WALLET_ADDRESS}/transactions/trc20"
         params = {
-            "limit": 50,
+            "limit": 100,  # 增加查询数量
             "only_confirmed": True
         }
 
@@ -474,6 +471,9 @@ async def check_usdt_transaction(amount: float) -> dict:
                         if not is_transaction_processed(tx_id):
                             return {"success": True, "tx_id": tx_id, "amount": tx_amount}
 
+            # 如果没找到且重试次数小于3，返回特殊状态让前端重试
+            if retry_count < 2:
+                return {"success": False, "message": "未找到匹配交易", "retry": True}
             return {"success": False, "message": "未找到匹配交易"}
         else:
             return {"success": False, "message": "API 请求失败"}
@@ -555,7 +555,6 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # 清理该用户的旧订单
     for amount_str, order in list(pending_usdt_orders.items()):
         if order["user_id"] == user_id:
-            # 将旧订单标记为取消
             old_order = pending_usdt_orders[amount_str]
             db_execute("""
                 UPDATE usdt_orders 
@@ -618,13 +617,12 @@ def clean_expired_orders():
     from config import USDT_ORDER_TIMEOUT
     import time
     import logging
-    
+
     current_time = time.time()
     expired_keys = []
     for amount_key, order in list(pending_usdt_orders.items()):
         if current_time - order["created_at"] > USDT_ORDER_TIMEOUT:
             expired_keys.append(amount_key)
-            # 更新数据库中的订单状态为 expired
             from database import db_execute
             db_execute("""
                 UPDATE usdt_orders 
@@ -636,7 +634,7 @@ def clean_expired_orders():
         logging.info(f"清理过期订单: {key}")
 
 async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户点击「我已支付」，检查订单状态"""
+    """用户点击「我已支付」，检查订单状态 - 修复：增加重试和自动解封"""
     query = update.callback_query
     await query.answer()
 
@@ -678,21 +676,31 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
         reply_markup=None
     )
 
-    result = await check_usdt_transaction(order["amount"])
+    # 尝试检测，最多重试3次
+    result = None
+    for retry in range(3):
+        result = await check_usdt_transaction(order["amount"], retry)
+        if result["success"]:
+            break
+        if retry < 2:
+            await asyncio.sleep(3)  # 等待3秒后重试
 
-    if result["success"]:
+    if result and result["success"]:
         # 1. 先解封用户（数据库）
         unban_user(user_id)
-        
+
         # 2. 延长会员时间
         new_expire = extend_member(user_id, order["days"])
-        
+
         # 3. 解封群组中的用户
         try:
             await context.bot.unban_chat_member(GROUP_ID, user_id)
             logging.info(f"USDT支付后解封用户 {user_id}")
         except Exception as e:
             logging.warning(f"解封用户 {user_id} 失败: {e}")
+
+        # 4. 重新获取用户状态（用于显示）
+        is_valid, status = get_user_status(user_id)
 
         # 更新数据库中的订单状态为 paid
         db_execute("""
