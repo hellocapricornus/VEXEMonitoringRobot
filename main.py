@@ -32,6 +32,7 @@ from handlers.admin import (
     cmd_extend,
     cmd_kick,
     cmd_unban,
+    cmd_delete_member,
     back_to_admin_menu,
     admin_stats,
     admin_add_trial,
@@ -39,6 +40,7 @@ from handlers.admin import (
     admin_extend,
     admin_kick,
     admin_unban,
+    admin_delete_member,
     admin_members,
     admin_trials,
     admin_banned,
@@ -46,10 +48,14 @@ from handlers.admin import (
     admin_reply_callback,
     admin_reply_command,
     admin_usdt_orders_callback,
+    admin_usdt_orders_history_callback,
+    admin_confirm_usdt_callback,
+    admin_broadcast_callback,
+    handle_broadcast,
 )
 from handlers.group import new_member_handler, left_member_handler
 from handlers.join_request import handle_join_request
-from handlers.admin import admin_usdt_orders_history_callback
+from handlers.user import clean_expired_orders
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +77,7 @@ def main():
     app.add_handler(CommandHandler("extend", cmd_extend))
     app.add_handler(CommandHandler("kick", cmd_kick))
     app.add_handler(CommandHandler("unban", cmd_unban))
+    #app.add_handler(CommandHandler("delete_member", cmd_delete_member))
     app.add_handler(CommandHandler("reply", admin_reply_command))
 
     # ================= 消息处理器 =================
@@ -84,6 +91,12 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & ~filters.Chat(chat_id=ADMIN_ID), 
         handle_user_message
+    ))
+
+    # 3. 处理广播消息
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE,
+        handle_broadcast
     ))
 
     # ================= 群组消息事件 =================
@@ -116,15 +129,28 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_extend, pattern="^admin_extend$"))
     app.add_handler(CallbackQueryHandler(admin_kick, pattern="^admin_kick$"))
     app.add_handler(CallbackQueryHandler(admin_unban, pattern="^admin_unban$"))
+    #app.add_handler(CallbackQueryHandler(admin_delete_member, pattern="^admin_delete_member$"))
     app.add_handler(CallbackQueryHandler(admin_members, pattern="^admin_members$"))
     app.add_handler(CallbackQueryHandler(admin_trials, pattern="^admin_trials$"))
     app.add_handler(CallbackQueryHandler(admin_banned, pattern="^admin_banned$"))
     app.add_handler(CallbackQueryHandler(admin_reply_callback, pattern="^admin_reply$"))
     app.add_handler(CallbackQueryHandler(admin_usdt_orders_callback, pattern="^admin_usdt_orders$"))
     app.add_handler(CallbackQueryHandler(admin_usdt_orders_history_callback, pattern="^admin_usdt_orders_history$"))
+    app.add_handler(CallbackQueryHandler(admin_confirm_usdt_callback, pattern="^admin_confirm_usdt_"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
 
     # ================= 定时任务 =================
-    app.job_queue.run_repeating(check_expired, interval=30, first=5)
+    if app.job_queue:
+        app.job_queue.run_repeating(check_expired, interval=30, first=5)
+
+        # 修复：将 lambda 改为普通函数
+        async def clean_orders_job(context):
+            clean_expired_orders()
+
+        app.job_queue.run_repeating(clean_orders_job, interval=300, first=10)
+        logging.info("定时任务已启动")
+    else:
+        logging.warning("JobQueue 不可用，定时任务未启动")
 
     logging.info("机器人启动，使用 polling 模式")
     app.run_polling()
