@@ -3,7 +3,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from database import add_trial, get_user, get_user_status, unban_user, db_execute
-from config import CHANNEL_LINK, GROUP_ID, TRIAL_HOURS
+from config import CHANNEL_LINK, GROUP_ID, GROUP_LINK, TRIAL_HOURS
 
 async def handle_join_request(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """用户申请加入群组时处理（唯一群组）"""
