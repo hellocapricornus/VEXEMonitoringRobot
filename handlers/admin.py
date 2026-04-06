@@ -1,22 +1,49 @@
+# admin.py - 移除删除会员功能后的版本
+
+import asyncio
+import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from config import GROUP_ID, ADMIN_ID, CHANNEL_LINK, GROUP_LINK
+from config import GROUP_ID, ADMIN_ID, CHANNEL_LINK, GROUP_LINK, TRIAL_HOURS
 from database import is_admin, add_trial, add_permanent, extend_member, ban_user, unban_user, get_user, db_execute, now, save_message, remove_permanent, delete_user_membership, log_admin_action
 from utils import kick_user, is_user_following_channel
-import logging
 
+# ================= 添加输入验证的辅助函数 =================
+def parse_user_id(args, arg_index=0) -> tuple:
+    """安全解析用户ID，返回 (success, user_id, error_message)"""
+    if len(args) <= arg_index:
+        return False, None, "缺少用户ID参数"
+    try:
+        user_id = int(args[arg_index])
+        return True, user_id, None
+    except ValueError:
+        return False, None, f"用户ID必须是数字，收到: {args[arg_index]}"
+
+def parse_extend_args(args) -> tuple:
+    """安全解析 extend 命令参数"""
+    if len(args) < 2:
+        return False, None, None, "用法: /extend 用户ID 天数"
+    try:
+        user_id = int(args[0])
+        days = int(args[1])
+        if days <= 0:
+            return False, None, None, "天数必须大于0"
+        return True, user_id, days, None
+    except ValueError as e:
+        return False, None, None, f"参数格式错误: {e}"
+
+# ================= 命令函数 =================
 async def cmd_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if len(context.args) < 1:
-        await update.message.reply_text("用法: /add_trial 用户ID")
-        return
-    uid = int(context.args[0])
 
-    # 添加试用资格
+    success, uid, error = parse_user_id(context.args)
+    if not success:
+        await update.message.reply_text(f"❌ {error}\n用法: /add_trial 用户ID")
+        return
+
     add_trial(uid)
 
-    # 只在用户被封禁时才解封
     try:
         member = await context.bot.get_chat_member(GROUP_ID, uid)
         if member.status in ["left", "kicked"]:
@@ -26,20 +53,19 @@ async def cmd_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logging.warning(f"解封用户 {uid} 失败: {e}")
 
     log_admin_action(update.effective_user.id, "add_trial", uid)
-    await update.message.reply_text(f"✅ 已为用户 {uid} 添加24小时试用并解封")
+    await update.message.reply_text(f"✅ 已为用户 {uid} 添加{TRIAL_HOURS}小时试用并解封")
 
 async def cmd_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if len(context.args) < 1:
-        await update.message.reply_text("用法: /add_permanent 用户ID")
-        return
-    uid = int(context.args[0])
 
-    # 添加永久会员
+    success, uid, error = parse_user_id(context.args)
+    if not success:
+        await update.message.reply_text(f"❌ {error}\n用法: /add_permanent 用户ID")
+        return
+
     add_permanent(uid)
 
-    # 只在用户被封禁时才解封
     try:
         member = await context.bot.get_chat_member(GROUP_ID, uid)
         if member.status in ["left", "kicked"]:
@@ -54,36 +80,28 @@ async def cmd_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if len(context.args) < 2:
-        await update.message.reply_text("用法: /extend 用户ID 天数")
+    success, uid, days, error = parse_extend_args(context.args)
+    if not success:
+        await update.message.reply_text(f"❌ {error}")
         return
-    uid, days = int(context.args[0]), int(context.args[1])
 
-    logging.info(f"=== 执行 extend 命令 ===")
-    logging.info(f"用户ID: {uid}, 天数: {days}")
+    logging.info(f"=== 执行 extend 命令 ===, 用户ID: {uid}, 天数: {days}")
 
-    # 查看执行前的数据
     before = db_execute("SELECT expire_time, trial_start_time, is_permanent, is_banned FROM users WHERE user_id=?", (uid,)).fetchone()
     logging.info(f"执行前: expire={before[0] if before else None}, trial={before[2] if before else None}")
 
-    # 延长会员时间
     new_expire = extend_member(uid, days)
 
-    # 查看执行后的数据
     after = db_execute("SELECT expire_time, trial_start_time, is_permanent, is_banned FROM users WHERE user_id=?", (uid,)).fetchone()
     logging.info(f"执行后: expire={after[0] if after else None}, trial={after[2] if after else None}")
 
-    # 验证用户状态
     from database import get_user_status
     is_valid, status = get_user_status(uid)
     logging.info(f"执行后用户状态: is_valid={is_valid}, status={status}")
 
-    # 关键修复：只解封被封禁的用户，不要对在群组中的用户调用 unban
     try:
-        # 先检查用户是否在群组中
         member = await context.bot.get_chat_member(GROUP_ID, uid)
         if member.status in ["left", "kicked"]:
-            # 用户不在群组或被封禁，才尝试解封
             await context.bot.unban_chat_member(GROUP_ID, uid)
             logging.info(f"用户 {uid} 已被解封")
         else:
@@ -91,7 +109,6 @@ async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.warning(f"检查/解封用户 {uid} 失败: {e}")
 
-    # 记录日志
     log_admin_action(update.effective_user.id, "extend", uid)
 
     await update.message.reply_text(
@@ -99,29 +116,28 @@ async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"新到期时间: {new_expire.strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"当前状态: {status}"
     )
-    
+
 async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if len(context.args) < 1:
-        await update.message.reply_text("用法: /kick 用户ID [原因]")
+    success, uid, error = parse_user_id(context.args)
+    if not success:
+        await update.message.reply_text(f"❌ {error}\n用法: /kick 用户ID [原因]")
         return
-    uid = int(context.args[0])
+
     reason = " ".join(context.args[1:]) if len(context.args) > 1 else "管理员操作"
 
-    # 记录日志
     log_admin_action(update.effective_user.id, "kick", uid)
-
     await kick_user(context, uid, reason)
     await update.message.reply_text(f"已踢出并封禁用户 {uid}")
 
 async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if len(context.args) < 1:
-        await update.message.reply_text("用法: /unban 用户ID")
+    success, uid, error = parse_user_id(context.args)
+    if not success:
+        await update.message.reply_text(f"❌ {error}\n用法: /unban 用户ID")
         return
-    uid = int(context.args[0])
     unban_user(uid)
     try:
         await context.bot.unban_chat_member(GROUP_ID, uid)
@@ -131,39 +147,49 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_admin_action(update.effective_user.id, "unban", uid)
     await update.message.reply_text(f"已解封用户 {uid}")
 
-# ================= 新增：删除会员功能 =================
-async def cmd_delete_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """删除用户的所有会员资格（包括永久会员）"""
-    logging.info("=== DELETE_MEMBER 命令被触发 ===")
+# ❌ 删除 cmd_delete_member 函数（已移除）
+
+# admin.py - 添加调试命令
+
+async def cmd_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """调试命令：查看用户状态（不会被定时任务删除）"""
     if not is_admin(update.effective_user.id):
         return
-    if len(context.args) < 1:
-        await update.message.reply_text("用法: /delete_member 用户ID")
+
+    success, uid, error = parse_user_id(context.args)
+    if not success:
+        await update.message.reply_text(f"❌ {error}\n用法: /check_user 用户ID")
         return
-    uid = int(context.args[0])
 
-    logging.info(f"=== 执行 delete_member 命令 ===, 用户ID: {uid}")
+    from database import get_user_status, db_execute
 
-    # 先查看用户当前状态
-    before = db_execute("SELECT is_permanent, expire_time, is_banned FROM users WHERE user_id=?", (uid,)).fetchone()
-    logging.info(f"删除前: is_permanent={before[0] if before else None}, expire={before[1] if before else None}, is_banned={before[2] if before else None}")
+    # 获取数据库原始数据
+    row = db_execute("SELECT user_id, expire_time, is_permanent, trial_start_time, is_banned FROM users WHERE user_id=?", (uid,)).fetchone()
 
-    # 删除所有会员资格
-    delete_user_membership(uid)
+    if not row:
+        await update.message.reply_text(f"❌ 用户 {uid} 不存在于数据库中")
+        return
 
-    # 查看删除后状态
-    after = db_execute("SELECT is_permanent, expire_time, is_banned FROM users WHERE user_id=?", (uid,)).fetchone()
-    logging.info(f"删除后: is_permanent={after[0] if after else None}, expire={after[1] if after else None}, is_banned={after[2] if after else None}")
+    is_valid, status = get_user_status(uid)
 
-    # 踢出群组并封禁
+    # 检查用户在群组中的状态
     try:
-        await context.bot.ban_chat_member(GROUP_ID, uid)
-        logging.info(f"已从群组封禁用户 {uid}")
+        member = await context.bot.get_chat_member(GROUP_ID, uid)
+        group_status = member.status
     except Exception as e:
-        logging.warning(f"封禁用户 {uid} 失败: {e}")
+        group_status = f"检查失败: {e}"
 
-    log_admin_action(update.effective_user.id, "delete_member", uid)
-    await update.message.reply_text(f"✅ 已删除用户 {uid} 的所有会员资格并封禁")
+    text = f"📊 **用户 {uid} 状态**\n\n"
+    text += f"存在于数据库: ✅\n"
+    text += f"永久会员: {'是' if row[2] else '否'}\n"
+    text += f"到期时间: {row[1] or '无'}\n"
+    text += f"试用开始: {row[3] or '无'}\n"
+    text += f"是否封禁: {'是' if row[4] else '否'}\n"
+    text += f"有效状态: {is_valid}\n"
+    text += f"状态描述: {status}\n"
+    text += f"群组状态: {group_status}\n"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
 
 # ================= 管理员回调 =================
 async def back_to_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -173,6 +199,7 @@ async def back_to_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     context.user_data.pop('replying_to_user', None)
 
+    # ❌ 移除删除会员按钮
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 统计", callback_data="admin_stats"),
          InlineKeyboardButton("➕ 添加临时会员", callback_data="admin_add_trial")],
@@ -455,7 +482,7 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_expired(context: ContextTypes.DEFAULT_TYPE):
     """检查试用和会员到期，以及频道关注状态"""
     from datetime import datetime, timedelta
-    from database import db_execute, now
+    from database import db_execute, now, get_user_status
     from config import TRIAL_HOURS, REMIND_HOURS, GROUP_ID, CHANNEL_LINK
     from utils import kick_user
     from database import is_admin as check_admin
@@ -471,29 +498,20 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
         if check_admin(uid):
             continue
 
+        # 🔧 修复：使用 get_user_status 统一判断用户是否有有效资格
+        is_valid, status = get_user_status(uid)
+
         # 检查用户是否还在群组中
         try:
             member = await context.bot.get_chat_member(GROUP_ID, uid)
             if member.status not in ["member", "administrator", "creator"]:
-                # 🔴 关键修复：不要删除有付费资格的用户！
-                # 检查用户是否有有效的会员资格
-                has_valid_paid = False
-                if is_permanent == 1:
-                    has_valid_paid = True
-                elif expire_time:
-                    try:
-                        expire = datetime.fromisoformat(expire_time)
-                        if expire > current:
-                            has_valid_paid = True
-                    except:
-                        pass
-
-                if has_valid_paid:
-                    # 付费用户不在群组，只记录日志，不删除
-                    logging.info(f"付费用户 {uid} 不在群组中，保留记录等待用户重新加入")
+                # 🔧 关键修复：只有真正无资格的用户才删除
+                if is_valid:
+                    # 有资格的用户不在群组，只记录日志，不删除
+                    logging.info(f"✅ 有资格用户 {uid} 不在群组中，保留记录 (状态: {status})")
                 else:
-                    # 非付费用户不在群组，删除记录
-                    logging.info(f"用户 {uid} 不在群组中且无付费资格，从数据库删除")
+                    # 无资格用户不在群组，删除记录
+                    logging.info(f"❌ 无资格用户 {uid} 不在群组中，从数据库删除 (状态: {status})")
                     db_execute("DELETE FROM users WHERE user_id=?", (uid,))
                 continue
         except Exception as e:
