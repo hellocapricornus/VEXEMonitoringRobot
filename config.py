@@ -1,3 +1,4 @@
+# config.py
 import os
 
 # ================= 配置 =================
@@ -5,13 +6,13 @@ BOT_TOKEN = "8350269629:AAGl3saDMy8M7O5OLW2jogwfp1ERkPhUrRY"
 ADMIN_ID = 8107909168
 GROUP_ID = -1003878983546
 CHANNEL_ID = -1003539038789
-MONITOR_GROUP_ID = -1003878983546
 
+# 统一使用 GROUP_ID 和 GROUP_LINK
+GROUP_LINK = "https://t.me/+BjHkQhpqknczYjk5"  # 原 MONITOR_GROUP_LINK
 CHANNEL_LINK = "https://t.me/+x_Fm8Eyp-edlNjgx"
-MONITOR_GROUP_LINK = "https://t.me/+BjHkQhpqknczYjk5"
 
-TRIAL_HOURS = 24
-REMIND_HOURS = 3
+TRIAL_HOURS = 24  # 24小时正式，测试用1分钟
+REMIND_HOURS = 3  # 3小时正式，测试用1分钟
 DELETE_DELAY = 10
 
 # ================= USDT 支付配置 =================
