@@ -89,6 +89,31 @@ def init_db():
     """)
     logging.info("USDT 订单记录表已初始化")
 
+    try:
+        db_execute("ALTER TABLE users ADD COLUMN last_channel_check TEXT")
+    except:
+        pass
+    try:
+        db_execute("ALTER TABLE users ADD COLUMN needs_channel_check INTEGER DEFAULT 0")
+    except:
+        pass
+    try:
+        db_execute("ALTER TABLE users ADD COLUMN reminded_type TEXT DEFAULT NULL")
+    except:
+        pass
+
+    logging.info("数据库表结构已更新")
+
+# 添加恢复待处理订单的函数
+def get_pending_orders():
+    """获取所有待处理的订单"""
+    rows = db_execute("""
+        SELECT order_id, user_id, plan_name, days, amount, created_at 
+        FROM usdt_orders 
+        WHERE status='pending'
+    """).fetchall()
+    return rows
+
 def is_admin(user_id: int) -> bool:
     from config import ADMIN_ID
     return user_id == ADMIN_ID
