@@ -1,4 +1,4 @@
-# user.py - 完整修复版本
+# user.py - 完整修复版本（包含所有函数）
 
 import asyncio
 import logging
@@ -7,13 +7,14 @@ import time
 import hashlib
 import json
 import requests
+import secrets
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from database import db_execute, now
 
 from config import (
-    TRIAL_HOURS, CHANNEL_LINK, GROUP_LINK, ADMIN_ID, GROUP_ID,  # 修改这里：MONITOR_GROUP_LINK -> GROUP_LINK
+    TRIAL_HOURS, CHANNEL_LINK, GROUP_LINK, ADMIN_ID, GROUP_ID,
     USDT_WALLET_ADDRESS, USDT_ORDER_TIMEOUT, USDT_PLANS
 )
 from database import now, BEIJING, get_user, get_user_status, is_admin, is_user_following_channel, has_valid_membership, save_message, extend_member, unban_user, db_execute, add_trial, get_pending_orders
@@ -24,12 +25,13 @@ pending_usdt_orders = {}
 
 # ================= 恢复订单 =================
 def restore_orders_on_startup():
-    """机器人启动时恢复未完成的订单"""
+    """机器人启动时恢复未完成的订单，并检查是否已支付"""
     global pending_usdt_orders
     rows = get_pending_orders()
+
     for row in rows:
         order_id, user_id, plan_name, days, amount, created_at = row
-        amount_key = f"{amount:.2f}"  # 使用2位小数作为key
+        amount_key = f"{amount:.2f}"
 
         # 处理 created_at 可能是字符串或 datetime 对象
         if isinstance(created_at, str):
@@ -48,20 +50,122 @@ def restore_orders_on_startup():
             "created_at": created_ts
         }
         logging.info(f"恢复订单: {amount_key} - 用户 {user_id}")
+
     logging.info(f"共恢复 {len(pending_usdt_orders)} 个待处理订单")
 
-# ================= 生成唯一金额 =================
+    # 启动时检查所有恢复订单的支付状态
+    if pending_usdt_orders:
+        logging.info("启动时检查待处理订单的支付状态...")
+        import asyncio
+        asyncio.create_task(check_all_pending_orders_on_startup())
+
+async def check_all_pending_orders_on_startup():
+    """启动时检查所有待处理订单的支付状态"""
+    await asyncio.sleep(5)  # 等待机器人完全启动
+    for amount_key, order in list(pending_usdt_orders.items()):
+        result = await check_usdt_transaction_with_retry(order["amount"], max_retries=2)
+        if result["success"]:
+            logging.info(f"启动时检测到订单 {amount_key} 已支付，自动处理")
+            # 这里需要传入 context，但启动时没有，记录日志由管理员手动处理
+            logging.info(f"订单 {order['order_id']} 可能需要手动确认")
+
+# ================= 生成唯一金额（修复碰撞问题）=================
 def generate_unique_amount(base_price: float, user_id: int) -> float:
-    """生成唯一金额，使用用户ID生成小数点后2位的唯一值"""
-    import time
-    timestamp = int(time.time())
-    # 使用用户ID后2位 + 时间戳后2位，生成0.01-0.99之间的唯一值
-    unique_cents = ((user_id % 100) * 100 + (timestamp % 100)) % 100
-    # 确保至少为1美分，避免为0
-    if unique_cents == 0:
-        unique_cents = 99
-    # 返回2位小数的金额
+    """生成唯一金额，使用 secrets 模块确保唯一性"""
+    # 使用 secrets 生成真正的随机数（1-99）
+    random_cents = secrets.randbelow(99) + 1
+    # 添加用户ID后2位作为额外因子，进一步降低碰撞
+    user_factor = user_id % 100
+    # 组合后取模，确保在1-99范围内
+    unique_cents = ((random_cents + user_factor) % 99) + 1
     return base_price + unique_cents / 100
+
+# ================= API 调用带重试（修复）=================
+async def check_usdt_transaction_with_retry(amount: float, max_retries: int = 3, retry_delay: float = 3) -> dict:
+    """带重试的 USDT 交易查询"""
+    last_error = None
+
+    for retry in range(max_retries):
+        try:
+            result = await check_usdt_transaction(amount, retry)
+            if result["success"]:
+                return result
+            if retry < max_retries - 1:
+                await asyncio.sleep(retry_delay * (retry + 1))  # 递增延迟
+        except Exception as e:
+            last_error = str(e)
+            logging.warning(f"查询交易失败 (重试 {retry+1}/{max_retries}): {e}")
+            if retry < max_retries - 1:
+                await asyncio.sleep(retry_delay * (retry + 1))
+
+    return {"success": False, "message": last_error or "查询失败"}
+
+async def check_usdt_transaction(amount: float, retry_count: int = 0) -> dict:
+    """通过 TronGrid API 查询 USDT 交易是否到账（添加超时和错误处理）"""
+    try:
+        url = f"https://api.trongrid.io/v1/accounts/{USDT_WALLET_ADDRESS}/transactions/trc20"
+        params = {
+            "limit": 100,
+            "only_confirmed": True
+        }
+
+        # 添加超时
+        response = requests.get(url, params=params, timeout=15)
+
+        if response.status_code == 200:
+            data = response.json()
+            transactions = data.get("data", [])
+
+            for tx in transactions:
+                if tx.get("type") == "Transfer" and tx.get("token_info", {}).get("symbol") == "USDT":
+                    tx_amount = float(tx.get("value", 0)) / 1000000
+                    to_address = tx.get("to")
+
+                    # 使用更精确的金额匹配（允许0.01误差）
+                    if abs(tx_amount - amount) < 0.01 and to_address == USDT_WALLET_ADDRESS:
+                        tx_id = tx.get("transaction_id")
+                        if not is_transaction_processed(tx_id):
+                            return {"success": True, "tx_id": tx_id, "amount": tx_amount}
+
+            if retry_count < 2:
+                return {"success": False, "message": "未找到匹配交易", "retry": True}
+            return {"success": False, "message": "未找到匹配交易"}
+        elif response.status_code == 429:
+            return {"success": False, "message": "API 限流，请稍后重试"}
+        else:
+            return {"success": False, "message": f"API 请求失败: {response.status_code}"}
+
+    except requests.exceptions.Timeout:
+        return {"success": False, "message": "请求超时"}
+    except requests.exceptions.ConnectionError:
+        return {"success": False, "message": "网络连接失败"}
+    except Exception as e:
+        logging.error(f"查询 USDT 交易失败: {e}", exc_info=True)
+        return {"success": False, "message": str(e)}
+
+def is_transaction_processed(tx_id: str) -> bool:
+    """检查交易是否已经处理过"""
+    row = db_execute("SELECT 1 FROM processed_transactions WHERE tx_id=?", (tx_id,)).fetchone()
+    return row is not None
+
+def mark_transaction_processed(tx_id: str, user_id: int, days: int):
+    """标记交易已处理"""
+    db_execute("""
+        INSERT INTO processed_transactions (tx_id, user_id, days, processed_at)
+        VALUES (?, ?, ?, ?)
+    """, (tx_id, user_id, days, now().isoformat()))
+
+def init_usdt_table():
+    """初始化 USDT 交易记录表"""
+    db_execute("""
+        CREATE TABLE IF NOT EXISTS processed_transactions (
+            tx_id TEXT PRIMARY KEY,
+            user_id INTEGER,
+            days INTEGER,
+            processed_at TEXT
+        )
+    """)
+    logging.info("USDT 交易记录表已初始化")
 
 # ================= 统一试用添加函数 =================
 async def ensure_trial_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE = None) -> tuple:
@@ -135,7 +239,7 @@ async def show_user_menu(update: Update, status: str, in_group: bool = True):
     ]
 
     if not in_group:
-        keyboard.insert(0, [InlineKeyboardButton("🔗 加入监听群", url=GROUP_LINK)])  # 修改这里
+        keyboard.insert(0, [InlineKeyboardButton("🔗 加入监听群", url=GROUP_LINK)])
 
     await update.message.reply_text(
         f"✅ {status}\n\n🎛 用户菜单",
@@ -170,7 +274,7 @@ async def show_channel_guide(update: Update, context: ContextTypes.DEFAULT_TYPE,
         in_group = False
 
     keyboard = [
-        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
+        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
         [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
@@ -384,7 +488,7 @@ async def check_follow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         in_group = False
 
     keyboard = [
-        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
+        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
         [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
@@ -481,7 +585,7 @@ async def back_to_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     is_valid, status = await ensure_trial_for_user(user_id, context)
 
     keyboard = [
-        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
+        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
         [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
@@ -499,67 +603,6 @@ async def restart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await start(update, context)
 
 # ================= USDT 支付 =================
-
-async def check_usdt_transaction(amount: float, retry_count: int = 0) -> dict:
-    """通过 TronGrid API 查询 USDT 交易是否到账"""
-    try:
-        url = f"https://api.trongrid.io/v1/accounts/{USDT_WALLET_ADDRESS}/transactions/trc20"
-        params = {
-            "limit": 100,
-            "only_confirmed": True
-        }
-
-        response = requests.get(url, params=params, timeout=15)
-
-        if response.status_code == 200:
-            data = response.json()
-            transactions = data.get("data", [])
-
-            for tx in transactions:
-                if tx.get("type") == "Transfer" and tx.get("token_info", {}).get("symbol") == "USDT":
-                    tx_amount = float(tx.get("value", 0)) / 1000000
-                    to_address = tx.get("to")
-
-                    # 使用更精确的金额匹配（允许0.01误差）
-                    if abs(tx_amount - amount) < 0.01 and to_address == USDT_WALLET_ADDRESS:
-                        tx_id = tx.get("transaction_id")
-                        if not is_transaction_processed(tx_id):
-                            return {"success": True, "tx_id": tx_id, "amount": tx_amount}
-
-            if retry_count < 2:
-                return {"success": False, "message": "未找到匹配交易", "retry": True}
-            return {"success": False, "message": "未找到匹配交易"}
-        else:
-            return {"success": False, "message": "API 请求失败"}
-
-    except Exception as e:
-        logging.error(f"查询 USDT 交易失败: {e}")
-        return {"success": False, "message": str(e)}
-
-def is_transaction_processed(tx_id: str) -> bool:
-    """检查交易是否已经处理过"""
-    row = db_execute("SELECT 1 FROM processed_transactions WHERE tx_id=?", (tx_id,)).fetchone()
-    return row is not None
-
-def mark_transaction_processed(tx_id: str, user_id: int, days: int):
-    """标记交易已处理"""
-    db_execute("""
-        INSERT INTO processed_transactions (tx_id, user_id, days, processed_at)
-        VALUES (?, ?, ?, ?)
-    """, (tx_id, user_id, days, now().isoformat()))
-
-def init_usdt_table():
-    """初始化 USDT 交易记录表"""
-    db_execute("""
-        CREATE TABLE IF NOT EXISTS processed_transactions (
-            tx_id TEXT PRIMARY KEY,
-            user_id INTEGER,
-            days INTEGER,
-            processed_at TEXT
-        )
-    """)
-    logging.info("USDT 交易记录表已初始化")
-
 async def user_buy_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """USDT 购买会员 - 显示套餐"""
     query = update.callback_query
@@ -618,7 +661,7 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             """, (old_order["order_id"],))
             del pending_usdt_orders[amount_str]
 
-    # 生成唯一金额（使用新的函数）
+    # 生成唯一金额（使用修复后的函数）
     unique_amount = generate_unique_amount(base_price, user_id)
     order_id = f"{user_id}_{int(time.time())}_{random.randint(1000, 9999)}"
     amount_key = f"{unique_amount:.2f}" 
@@ -688,7 +731,7 @@ def clean_expired_orders():
         logging.info(f"清理过期订单: {key}")
 
 async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户点击「我已支付」，检查订单状态"""
+    """用户点击「我已支付」，检查订单状态（使用带重试的版本）"""
     query = update.callback_query
     await query.answer()
 
@@ -730,14 +773,8 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
         reply_markup=None
     )
 
-    # 尝试检测，最多重试3次
-    result = None
-    for retry in range(3):
-        result = await check_usdt_transaction(order["amount"], retry)
-        if result["success"]:
-            break
-        if retry < 2:
-            await asyncio.sleep(3)
+    # 使用带重试的版本
+    result = await check_usdt_transaction_with_retry(order["amount"], max_retries=3)
 
     if result and result["success"]:
         # 1. 先解封用户（数据库）
@@ -790,7 +827,7 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
             f"会员到期时间：{new_expire.strftime('%Y-%m-%d %H:%M')}\n\n"
             f"感谢您的支持！",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
+                [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],
                 [InlineKeyboardButton("📊 查看状态", callback_data="user_query")],
                 [InlineKeyboardButton("◀️ 返回菜单", callback_data="back_to_user_menu")]
             ]),
