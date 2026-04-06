@@ -3,7 +3,7 @@ import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import GROUP_ID
+from config import GROUP_ID, GROUP_LINK
 from database import get_user, is_admin, db_execute
 from utils import send_temp
 
