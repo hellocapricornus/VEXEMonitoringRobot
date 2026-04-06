@@ -1,3 +1,5 @@
+# user.py - 完整修复版本
+
 import asyncio
 import logging
 import random
@@ -11,11 +13,118 @@ from telegram.ext import ContextTypes
 from database import db_execute, now
 
 from config import (
-    TRIAL_HOURS, CHANNEL_LINK, MONITOR_GROUP_LINK, ADMIN_ID, GROUP_ID,
+    TRIAL_HOURS, CHANNEL_LINK, GROUP_LINK, ADMIN_ID, GROUP_ID,  # 修改这里：MONITOR_GROUP_LINK -> GROUP_LINK
     USDT_WALLET_ADDRESS, USDT_ORDER_TIMEOUT, USDT_PLANS
 )
-from database import now, BEIJING, get_user, get_user_status, is_admin, is_user_following_channel, has_valid_membership, save_message, extend_member, unban_user, db_execute, add_trial
+from database import now, BEIJING, get_user, get_user_status, is_admin, is_user_following_channel, has_valid_membership, save_message, extend_member, unban_user, db_execute, add_trial, get_pending_orders
 from utils import send_temp
+
+# ================= 全局变量 =================
+pending_usdt_orders = {}
+
+# ================= 恢复订单 =================
+def restore_orders_on_startup():
+    """机器人启动时恢复未完成的订单"""
+    global pending_usdt_orders
+    rows = get_pending_orders()
+    for row in rows:
+        order_id, user_id, plan_name, days, amount, created_at = row
+        amount_key = f"{amount:.2f}"  # 使用2位小数作为key
+
+        # 处理 created_at 可能是字符串或 datetime 对象
+        if isinstance(created_at, str):
+            from datetime import datetime
+            created_dt = datetime.fromisoformat(created_at)
+            created_ts = created_dt.timestamp()
+        else:
+            created_ts = created_at.timestamp() if hasattr(created_at, 'timestamp') else time.time()
+
+        pending_usdt_orders[amount_key] = {
+            "order_id": order_id,
+            "user_id": user_id,
+            "days": days,
+            "amount": amount,
+            "plan_name": plan_name,
+            "created_at": created_ts
+        }
+        logging.info(f"恢复订单: {amount_key} - 用户 {user_id}")
+    logging.info(f"共恢复 {len(pending_usdt_orders)} 个待处理订单")
+
+# ================= 生成唯一金额 =================
+def generate_unique_amount(base_price: float, user_id: int) -> float:
+    """生成唯一金额，使用用户ID生成小数点后2位的唯一值"""
+    import time
+    timestamp = int(time.time())
+    # 使用用户ID后2位 + 时间戳后2位，生成0.01-0.99之间的唯一值
+    unique_cents = ((user_id % 100) * 100 + (timestamp % 100)) % 100
+    # 确保至少为1美分，避免为0
+    if unique_cents == 0:
+        unique_cents = 99
+    # 返回2位小数的金额
+    return base_price + unique_cents / 100
+
+# ================= 统一试用添加函数 =================
+async def ensure_trial_for_user(user_id: int, context: ContextTypes.DEFAULT_TYPE = None) -> tuple:
+    """确保用户有试用资格，返回 (是否有资格, 状态文本)"""
+    row = get_user(user_id)
+    is_valid, status = get_user_status(user_id)
+
+    # 🔴 关键修复：如果用户有会员资格，绝不添加试用
+    if row and (row[0] or row[1] == 1):  # 有 expire_time 或是永久会员
+        return True, status
+
+    # 如果用户没有有效资格且没有试用记录，添加试用
+    if not is_valid and (not row or not row[2]):
+        add_trial(user_id)
+        logging.info(f"用户 {user_id} 自动添加试用资格")
+        is_valid, status = get_user_status(user_id)
+        return True, "🧪 您已获得24小时免费试用资格！"
+
+    return is_valid, status
+
+# ================= 频道检查函数（统一） =================
+async def check_and_handle_channel(context, user_id, kick_only=False):
+    """检查频道关注并处理，返回是否关注
+
+    Args:
+        kick_only: True=只踢出不封禁，False=封禁并踢出
+    """
+    is_following = await is_user_following_channel(context, user_id)
+
+    if not is_following:
+        # 标记需要重新检查
+        db_execute("UPDATE users SET needs_channel_check=1 WHERE user_id=?", (user_id,))
+
+        if kick_only:
+            # 只踢出不封禁
+            try:
+                await context.bot.ban_chat_member(GROUP_ID, user_id)
+                await context.bot.unban_chat_member(GROUP_ID, user_id)
+                logging.info(f"用户 {user_id} 未关注频道，已踢出（未封禁）")
+            except Exception as e:
+                logging.error(f"踢出用户 {user_id} 失败: {e}")
+        else:
+            # 封禁并踢出
+            from utils import kick_user
+            await kick_user(context, user_id, "未关注频道", ban=True)
+            logging.info(f"用户 {user_id} 未关注频道，已封禁")
+
+        # 尝试私聊通知
+        try:
+            await context.bot.send_message(
+                user_id,
+                f"❌ 您未关注我们的频道，无法继续使用服务。\n\n"
+                f"请关注频道后重新申请加入群组。\n\n"
+                f"👉 {CHANNEL_LINK}"
+            )
+        except:
+            pass
+
+        return False
+
+    # 已关注，清除标记
+    db_execute("UPDATE users SET needs_channel_check=0 WHERE user_id=?", (user_id,))
+    return True
 
 async def show_user_menu(update: Update, status: str, in_group: bool = True):
     """显示用户菜单"""
@@ -26,7 +135,7 @@ async def show_user_menu(update: Update, status: str, in_group: bool = True):
     ]
 
     if not in_group:
-        keyboard.insert(0, [InlineKeyboardButton("🔗 加入监听群", url=MONITOR_GROUP_LINK)])
+        keyboard.insert(0, [InlineKeyboardButton("🔗 加入监听群", url=GROUP_LINK)])  # 修改这里
 
     await update.message.reply_text(
         f"✅ {status}\n\n🎛 用户菜单",
@@ -34,17 +143,14 @@ async def show_user_menu(update: Update, status: str, in_group: bool = True):
     )
 
 async def show_channel_guide(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    """显示频道关注引导 - 修复：自动添加试用资格"""
+    """显示频道关注引导"""
     is_following = await is_user_following_channel(context, user_id)
 
-    logging.info(f"用户 {user_id} 频道关注状态: {is_following}")
-
     if not is_following:
-        # 未关注频道 -> 显示关注引导
         keyboard = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 关注频道", url=CHANNEL_LINK)],
-                [InlineKeyboardButton("✅ 我已关注", callback_data="check_follow")]
-            ])
+            [InlineKeyboardButton("📢 关注频道", url=CHANNEL_LINK)],
+            [InlineKeyboardButton("✅ 我已关注", callback_data="check_follow")]
+        ])
         await update.message.reply_text(
             "❌ 您需要先关注我们的频道\n\n"
             "请先关注频道，然后点击「我已关注」按钮。\n\n"
@@ -53,22 +159,8 @@ async def show_channel_guide(update: Update, context: ContextTypes.DEFAULT_TYPE,
         )
         return
 
-    # 已关注频道 -> 检查并自动添加试用资格
-    row = get_user(user_id)
-    is_valid, status = get_user_status(user_id)
-
-    # 关键修复：如果用户没有试用资格且不是会员，自动添加试用
-    if not is_valid and (not row or not row[2]):
-        add_trial(user_id)
-        logging.info(f"用户 {user_id} 完成频道关注，自动添加24小时试用")
-        status_text = "🧪 您已获得24小时免费试用资格！"
-    else:
-        if "试用" in status:
-            status_text = f"🧪 {status}"
-        elif "会员" in status:
-            status_text = f"💎 {status}"
-        else:
-            status_text = f"✅ {status}"
+    # 使用统一的试用添加函数
+    is_valid, status = await ensure_trial_for_user(user_id, context)
 
     # 检查用户是否在群组中
     try:
@@ -77,17 +169,15 @@ async def show_channel_guide(update: Update, context: ContextTypes.DEFAULT_TYPE,
     except:
         in_group = False
 
-    # 构建菜单按钮
     keyboard = [
-        [InlineKeyboardButton("🔗 加入群组", url=MONITOR_GROUP_LINK)],
+        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
         [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
     ]
 
     await update.message.reply_text(
-        f"{status_text}\n\n"
-        f"🎛 功能菜单",
+        f"{status}\n\n🎛 功能菜单",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -146,7 +236,7 @@ async def contact_admin_callback(update: Update, context: ContextTypes.DEFAULT_T
     context.user_data['user_name'] = user_name
 
 async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理用户发送给管理员的消息（只在私聊中处理）"""
+    """处理用户发送给管理员的消息"""
     if update.effective_chat.type != "private":
         return
 
@@ -155,9 +245,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     if context.user_data.get('waiting_for_admin_msg'):
         user_name = context.user_data.get('user_name', str(user_id))
-
-        from database import save_message
-        from config import ADMIN_ID
 
         save_message(user_id, ADMIN_ID, message_text)
 
@@ -175,7 +262,6 @@ async def handle_user_message(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.message.reply_text("✅ 消息已发送给管理员，请耐心等待回复。")
         except Exception as e:
             await update.message.reply_text(f"❌ 发送失败：{e}")
-            logging.error(f"转发消息给管理员失败: {e}")
 
         context.user_data['waiting_for_admin_msg'] = False
         context.user_data['user_name'] = None
@@ -194,7 +280,6 @@ async def reply_user_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
 
-    from database import is_admin
     if not is_admin(query.from_user.id):
         await query.edit_message_text("⛔ 只有管理员可以使用此功能。")
         return
@@ -230,8 +315,11 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     admin_id = update.effective_user.id
 
-    from database import is_admin
     if not is_admin(admin_id):
+        return
+
+    # 如果在广播模式，不处理回复
+    if context.user_data.get('broadcast_mode'):
         return
 
     replying_to = context.user_data.get('replying_to_user')
@@ -239,9 +327,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if replying_to:
         user_id = replying_to
         reply_text = update.message.text
-
-        from database import save_message
-        from config import ADMIN_ID
 
         save_message(ADMIN_ID, user_id, reply_text)
 
@@ -257,7 +342,6 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         except Exception as e:
             await update.message.reply_text(f"❌ 发送失败：{e}")
-            logging.error(f"回复用户失败: {e}")
         return
 
     await update.message.reply_text(
@@ -270,13 +354,12 @@ async def handle_admin_reply(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ================= 用户回调 =================
 async def check_follow_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """检查用户是否真的关注了频道 - 修复：自动添加试用资格"""
+    """检查用户是否真的关注了频道"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
 
     is_following = await is_user_following_channel(context, user_id)
-    logging.info(f"check_follow: 用户 {user_id} 关注状态: {is_following}")
 
     if not is_following:
         keyboard = InlineKeyboardMarkup([
@@ -291,21 +374,8 @@ async def check_follow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    # 关键修复：检查并自动添加试用资格
-    row = get_user(user_id)
-    is_valid, status = get_user_status(user_id)
-
-    if not is_valid and (not row or not row[2]):
-        add_trial(user_id)
-        logging.info(f"用户 {user_id} 完成频道关注，自动添加24小时试用")
-        status_text = "🧪 您已获得24小时免费试用资格！"
-    else:
-        if "试用" in status:
-            status_text = f"🧪 {status}"
-        elif "会员" in status:
-            status_text = f"💎 {status}"
-        else:
-            status_text = f"✅ {status}"
+    # 使用统一的试用添加函数
+    is_valid, status = await ensure_trial_for_user(user_id, context)
 
     try:
         member = await context.bot.get_chat_member(GROUP_ID, user_id)
@@ -314,15 +384,14 @@ async def check_follow_callback(update: Update, context: ContextTypes.DEFAULT_TY
         in_group = False
 
     keyboard = [
-        [InlineKeyboardButton("🔗 加入群组", url=MONITOR_GROUP_LINK)],
+        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
         [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
     ]
 
     await query.edit_message_text(
-        f"{status_text}\n\n"
-        f"🎛 功能菜单",
+        f"{status}\n\n🎛 功能菜单",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -388,7 +457,7 @@ async def user_query_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=keyboard)
 
 async def back_to_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """返回用户菜单 - 修复：确保有试用资格"""
+    """返回用户菜单"""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -408,31 +477,18 @@ async def back_to_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # 确保用户有试用资格
-    row = get_user(user_id)
-    is_valid, status = get_user_status(user_id)
-
-    if not is_valid and (not row or not row[2]):
-        add_trial(user_id)
-        status_text = "🧪 您已获得24小时免费试用资格！"
-    else:
-        if "试用" in status:
-            status_text = f"🧪 {status}"
-        elif "会员" in status:
-            status_text = f"💎 {status}"
-        else:
-            status_text = f"✅ {status}"
+    # 使用统一的试用添加函数
+    is_valid, status = await ensure_trial_for_user(user_id, context)
 
     keyboard = [
-        [InlineKeyboardButton("🔗 加入群组", url=MONITOR_GROUP_LINK)],
+        [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
         [InlineKeyboardButton("🕒 查询会员时间", callback_data="user_query")],
         [InlineKeyboardButton("💰 购买会员", callback_data="user_buy_usdt")],
         [InlineKeyboardButton("📞 联系管理员", callback_data="contact_admin")]
     ]
 
     await query.edit_message_text(
-        f"{status_text}\n\n"
-        f"🎛 功能菜单",
+        f"{status}\n\n🎛 功能菜单",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
@@ -444,14 +500,12 @@ async def restart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= USDT 支付 =================
 
-pending_usdt_orders = {}
-
 async def check_usdt_transaction(amount: float, retry_count: int = 0) -> dict:
-    """通过 TronGrid API 查询 USDT 交易是否到账 - 增加重试机制"""
+    """通过 TronGrid API 查询 USDT 交易是否到账"""
     try:
         url = f"https://api.trongrid.io/v1/accounts/{USDT_WALLET_ADDRESS}/transactions/trc20"
         params = {
-            "limit": 100,  # 增加查询数量
+            "limit": 100,
             "only_confirmed": True
         }
 
@@ -466,12 +520,12 @@ async def check_usdt_transaction(amount: float, retry_count: int = 0) -> dict:
                     tx_amount = float(tx.get("value", 0)) / 1000000
                     to_address = tx.get("to")
 
+                    # 使用更精确的金额匹配（允许0.01误差）
                     if abs(tx_amount - amount) < 0.01 and to_address == USDT_WALLET_ADDRESS:
                         tx_id = tx.get("transaction_id")
                         if not is_transaction_processed(tx_id):
                             return {"success": True, "tx_id": tx_id, "amount": tx_amount}
 
-            # 如果没找到且重试次数小于3，返回特殊状态让前端重试
             if retry_count < 2:
                 return {"success": False, "message": "未找到匹配交易", "retry": True}
             return {"success": False, "message": "未找到匹配交易"}
@@ -563,11 +617,10 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             """, (old_order["order_id"],))
             del pending_usdt_orders[amount_str]
 
-    # 生成唯一金额
-    random_cents = random.randint(1, 99)
-    unique_amount = base_price + random_cents / 100
-    order_id = f"{user_id}_{int(time.time())}_{random_cents}"
-    amount_key = f"{unique_amount:.2f}"
+    # 生成唯一金额（使用新的函数）
+    unique_amount = generate_unique_amount(base_price, user_id)
+    order_id = f"{user_id}_{int(time.time())}_{random.randint(1000, 9999)}"
+    amount_key = f"{unique_amount:.2f}" 
 
     # 存储到内存
     pending_usdt_orders[amount_key] = {
@@ -596,14 +649,14 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     ])
 
     await query.edit_message_text(
-        f"💎 **{name}** - {unique_amount} USDT\n\n"
+        f"💎 **{name}** - {unique_amount:.2f} USDT\n\n"
         f"📌 **转账信息**\n"
         f"网络：**TRC20**\n"
         f"地址：`{USDT_WALLET_ADDRESS}`\n"
-        f"金额：**{unique_amount} USDT**\n\n"
+        f"金额：**{unique_amount:.2f} USDT**\n\n"
         f"📝 **订单号**：`{order_id}`\n\n"
         f"⚠️ **重要提示**\n"
-        f"1. 请转账**精确金额** `{unique_amount} USDT`\n"
+        f"1. 请转账**精确金额** `{unique_amount:.2f} USDT`\n"
         f"2. 必须使用 **TRC20** 网络\n"
         f"3. 转账后点击「我已支付」\n"
         f"4. ⏰ **请在 10 分钟内完成支付**\n\n"
@@ -634,7 +687,7 @@ def clean_expired_orders():
         logging.info(f"清理过期订单: {key}")
 
 async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """用户点击「我已支付」，检查订单状态 - 修复：增加重试和自动解封"""
+    """用户点击「我已支付」，检查订单状态"""
     query = update.callback_query
     await query.answer()
 
@@ -671,7 +724,7 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
 
     await query.edit_message_text(
         f"⏳ 正在检测转账...\n\n"
-        f"金额：{order['amount']} USDT\n"
+        f"金额：{order['amount']:.2f} USDT\n"
         f"请稍等，这可能需要几秒钟。",
         reply_markup=None
     )
@@ -683,46 +736,60 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
         if result["success"]:
             break
         if retry < 2:
-            await asyncio.sleep(3)  # 等待3秒后重试
+            await asyncio.sleep(3)
 
     if result and result["success"]:
         # 1. 先解封用户（数据库）
         unban_user(user_id)
 
-        # 2. 延长会员时间
+        # 2. 检查频道关注（重要：防止用户取消关注后购买）
+        is_following = await is_user_following_channel(context, user_id)
+        if not is_following:
+            await query.edit_message_text(
+                f"⚠️ 检测到您未关注频道！\n\n"
+                f"请先关注频道后再支付。\n\n"
+                f"👉 {CHANNEL_LINK}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📢 关注频道", url=CHANNEL_LINK)],
+                    [InlineKeyboardButton("✅ 我已关注并支付", callback_data=f"check_usdt_{amount_key}")]
+                ])
+            )
+            return
+
+        # 3. 延长会员时间
         new_expire = extend_member(user_id, order["days"])
 
-        # 3. 解封群组中的用户
+        # 4. 解封群组中的用户
         try:
             await context.bot.unban_chat_member(GROUP_ID, user_id)
             logging.info(f"USDT支付后解封用户 {user_id}")
         except Exception as e:
             logging.warning(f"解封用户 {user_id} 失败: {e}")
 
-        # 4. 重新获取用户状态（用于显示）
+        # 5. 重新获取用户状态
         is_valid, status = get_user_status(user_id)
 
-        # 更新数据库中的订单状态为 paid
+        # 6. 更新数据库中的订单状态
         db_execute("""
             UPDATE usdt_orders 
             SET status='paid', paid_at=?, tx_id=?
             WHERE order_id=?
         """, (now().isoformat(), result["tx_id"], order["order_id"]))
 
-        # 标记交易已处理
+        # 7. 标记交易已处理
         mark_transaction_processed(result["tx_id"], user_id, order["days"])
 
-        # 删除内存中的订单
+        # 8. 删除内存中的订单
         del pending_usdt_orders[amount_key]
 
         await query.edit_message_text(
             f"✅ **支付成功！**\n\n"
             f"套餐：{order['plan_name']}\n"
-            f"金额：{order['amount']} USDT\n"
+            f"金额：{order['amount']:.2f} USDT\n"
             f"会员到期时间：{new_expire.strftime('%Y-%m-%d %H:%M')}\n\n"
             f"感谢您的支持！",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔗 加入群组", url=MONITOR_GROUP_LINK)],
+                [InlineKeyboardButton("🔗 加入群组", url=GROUP_LINK)],  # 修改这里
                 [InlineKeyboardButton("📊 查看状态", callback_data="user_query")],
                 [InlineKeyboardButton("◀️ 返回菜单", callback_data="back_to_user_menu")]
             ]),
@@ -734,9 +801,9 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
         seconds = remaining_time % 60
 
         await query.edit_message_text(
-            f"⏳ 未检测到 {order['amount']} USDT 的转账记录\n\n"
+            f"⏳ 未检测到 {order['amount']:.2f} USDT 的转账记录\n\n"
             f"请确认：\n"
-            f"1. 已转账**精确金额** {order['amount']} USDT\n"
+            f"1. 已转账**精确金额** {order['amount']:.2f} USDT\n"
             f"2. 使用的是 **TRC20** 网络\n"
             f"3. 转账已完成（需要约 1-3 分钟确认）\n\n"
             f"⏰ 订单剩余时间：{minutes}分{seconds}秒\n\n"
