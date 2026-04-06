@@ -1,6 +1,9 @@
+# main.py - 修复定时任务和导入问题
+
 #!/usr/bin/env python3
 import logging
 import datetime as dt
+import os
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -25,6 +28,7 @@ from handlers.user import (
     user_buy_usdt,
     usdt_plan_callback,
     check_usdt_payment_callback,
+    clean_expired_orders,  # 统一从这里导入
 )
 from handlers.admin import (
     cmd_add_trial,
@@ -32,7 +36,6 @@ from handlers.admin import (
     cmd_extend,
     cmd_kick,
     cmd_unban,
-    cmd_delete_member,
     back_to_admin_menu,
     admin_stats,
     admin_add_trial,
@@ -40,7 +43,6 @@ from handlers.admin import (
     admin_extend,
     admin_kick,
     admin_unban,
-    admin_delete_member,
     admin_members,
     admin_trials,
     admin_banned,
@@ -52,21 +54,51 @@ from handlers.admin import (
     admin_confirm_usdt_callback,
     admin_broadcast_callback,
     handle_broadcast,
+    cmd_check_user,
 )
 from handlers.group import new_member_handler, left_member_handler
 from handlers.join_request import handle_join_request
-from handlers.user import clean_expired_orders
 
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(message)s"
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 
-# main.py - 修改消息处理器部分
+# 🔧 添加分布式锁标记（如果使用多个 worker，需要外部存储如 Redis）
+# 这里使用环境变量标记，单实例部署时安全
+WORKER_ID = os.environ.get("WORKER_ID", "default")
+SCHEDULER_LOCK_KEY = "scheduler_running"
 
 def main():
     # 初始化数据库
     init_db()
+
+    # 🔧 添加：启动时验证数据库完整性
+    from database import db_execute, get_user_status
+
+    # 1. 显示所有付费用户
+    paid_users = db_execute("SELECT user_id, expire_time, is_permanent FROM users WHERE expire_time IS NOT NULL OR is_permanent=1").fetchall()
+    logging.info(f"=== 启动时数据库状态 ===")
+    logging.info(f"付费用户总数: {len(paid_users)}")
+
+    for user in paid_users:
+        user_id = user[0]
+        expire_time = user[1]
+        is_permanent = user[2]
+
+        # 验证每个付费用户的状态
+        is_valid, status = get_user_status(user_id)
+        logging.info(f"用户 {user_id}: 永久={is_permanent}, 到期={expire_time}, 有效={is_valid}, 状态={status}")
+
+        # 🔧 如果有资格但不在群组，不删除，只记录
+        if is_valid:
+            logging.info(f"✅ 用户 {user_id} 有有效会员资格，已保留")
+
+    # 2. 检查数据库文件位置
+    import os
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.db")
+    logging.info(f"数据库文件位置: {db_path}")
+    logging.info(f"数据库文件存在: {os.path.exists(db_path)}")
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
@@ -78,6 +110,7 @@ def main():
     app.add_handler(CommandHandler("kick", cmd_kick))
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("reply", admin_reply_command))
+    app.add_handler(CommandHandler("check_user", cmd_check_user))
 
     # ================= 消息处理器 - 调整优先级 =================
     # 1. 广播消息处理器（最高优先级，group=1）
@@ -138,42 +171,48 @@ def main():
 
     # ================= 定时任务 =================
     if app.job_queue:
-        # 原有的任务
-        app.job_queue.run_repeating(check_expired, interval=30, first=5)
+        # 🔧 使用环境变量判断是否启用定时任务（避免多 worker 重复）
+        enable_scheduler = os.environ.get("ENABLE_SCHEDULER", "true").lower() == "true"
 
-        async def clean_orders_job(context):
-            clean_expired_orders()
+        if enable_scheduler:
+            # 原有的任务
+            app.job_queue.run_repeating(check_expired, interval=30, first=5)
 
-        app.job_queue.run_repeating(clean_orders_job, interval=300, first=10)
+            async def clean_orders_job(context):
+                clean_expired_orders()
 
-        # 新增：每天凌晨3点清理旧订单
-        from database import clean_old_orders, update_expired_pending_orders
+            app.job_queue.run_repeating(clean_orders_job, interval=300, first=10)
 
-        async def clean_database_job(context):
-            """定时清理数据库任务"""
-            logging.info("开始执行数据库清理任务...")
+            # 新增：每天凌晨3点清理旧订单
+            from database import clean_old_orders, update_expired_pending_orders
 
-            # 1. 先将超时的待处理订单转为过期
-            updated = update_expired_pending_orders()
-            logging.info(f"已将 {updated} 个超时订单转为过期")
+            async def clean_database_job(context):
+                """定时清理数据库任务"""
+                logging.info(f"Worker {WORKER_ID}: 开始执行数据库清理任务...")
 
-            # 2. 清理旧订单
-            deleted = clean_old_orders()
-            logging.info(f"数据库清理完成，共删除 {deleted} 条记录")
+                # 1. 先将超时的待处理订单转为过期
+                updated = update_expired_pending_orders()
+                logging.info(f"已将 {updated} 个超时订单转为过期")
 
-        # 设置每天凌晨3点执行
-        app.job_queue.run_daily(
-            clean_database_job,
-            time=dt.time(hour=3, minute=0),
-            days=tuple(range(7))  # 每天执行
-        )
-        logging.info("数据库定时清理任务已启动（每天凌晨3点）")
+                # 2. 清理旧订单
+                deleted = clean_old_orders()
+                logging.info(f"数据库清理完成，共删除 {deleted} 条记录")
+
+            # 设置每天凌晨3点执行
+            app.job_queue.run_daily(
+                clean_database_job,
+                time=dt.time(hour=3, minute=0),
+                days=tuple(range(7))
+            )
+            logging.info("数据库定时清理任务已启动（每天凌晨3点）")
+        else:
+            logging.info("定时任务已禁用（ENABLE_SCHEDULER=false）")
 
     # 启动时恢复待处理订单
     from handlers.user import restore_orders_on_startup
     restore_orders_on_startup()
 
-    logging.info("机器人启动，使用 polling 模式")
+    logging.info(f"机器人启动 (Worker: {WORKER_ID})，使用 polling 模式")
     app.run_polling()
 
 if __name__ == "__main__":
