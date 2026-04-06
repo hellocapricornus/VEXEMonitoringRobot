@@ -1,3 +1,4 @@
+#databasr.py文件
 import logging
 import sqlite3
 import threading
@@ -103,6 +104,26 @@ def init_db():
         pass
 
     logging.info("数据库表结构已更新")
+    
+    # ========== 创建索引（优化查询性能）==========
+    try:
+        # usdt_orders 表索引
+        db_execute("CREATE INDEX IF NOT EXISTS idx_orders_status_created ON usdt_orders(status, created_at)")
+        db_execute("CREATE INDEX IF NOT EXISTS idx_orders_plan_name ON usdt_orders(plan_name)")
+        db_execute("CREATE INDEX IF NOT EXISTS idx_orders_user_id ON usdt_orders(user_id)")
+
+        # users 表索引
+        db_execute("CREATE INDEX IF NOT EXISTS idx_users_expire ON users(expire_time)")
+        db_execute("CREATE INDEX IF NOT EXISTS idx_users_banned ON users(is_banned)")
+        db_execute("CREATE INDEX IF NOT EXISTS idx_users_permanent ON users(is_permanent)")
+
+        # messages 表索引（如果需要查询历史消息）
+        db_execute("CREATE INDEX IF NOT EXISTS idx_messages_timestamp ON messages(timestamp)")
+        db_execute("CREATE INDEX IF NOT EXISTS idx_messages_users ON messages(from_user, to_user)")
+
+        logging.info("数据库索引创建完成")
+    except Exception as e:
+        logging.warning(f"创建索引时出错: {e}")
 
 # 添加恢复待处理订单的函数
 def get_pending_orders():
@@ -290,3 +311,102 @@ def log_admin_action(admin_id: int, action: str, target_id: int = None):
         INSERT INTO admin_logs (admin_id, action, target_id, timestamp)
         VALUES (?, ?, ?, ?)
     """, (admin_id, action, target_id, now().isoformat()))
+
+# database.py - 添加清理函数
+
+def clean_old_orders():
+    """根据套餐类型清理不同期限的订单"""
+    from datetime import datetime, timedelta
+    import logging
+
+    current = now()
+    deleted_count = 0
+
+    # 1. 清理过期订单（所有套餐统一7天）
+    expired_cutoff = (current - timedelta(days=7)).isoformat()
+    expired_deleted = db_execute("""
+        DELETE FROM usdt_orders 
+        WHERE status = 'expired' 
+        AND created_at < ?
+    """, (expired_cutoff,)).rowcount
+    deleted_count += expired_deleted
+    logging.info(f"清理过期订单: {expired_deleted} 条")
+
+    # 2. 清理取消订单（所有套餐统一7天）
+    cancelled_cutoff = (current - timedelta(days=7)).isoformat()
+    cancelled_deleted = db_execute("""
+        DELETE FROM usdt_orders 
+        WHERE status = 'cancelled' 
+        AND created_at < ?
+    """, (cancelled_cutoff,)).rowcount
+    deleted_count += cancelled_deleted
+    logging.info(f"清理取消订单: {cancelled_deleted} 条")
+
+    # 3. 清理支付成功的订单（根据套餐类型）
+    # 获取所有 paid 状态的订单
+    paid_orders = db_execute("""
+        SELECT order_id, plan_name, created_at 
+        FROM usdt_orders 
+        WHERE status = 'paid'
+    """).fetchall()
+
+    for order_id, plan_name, created_at_str in paid_orders:
+        created_at = datetime.fromisoformat(created_at_str)
+
+        # 根据套餐名称确定保留天数
+        retention_days = get_retention_days(plan_name)
+
+        if retention_days:
+            cutoff_date = created_at + timedelta(days=retention_days)
+            if current > cutoff_date:
+                db_execute("DELETE FROM usdt_orders WHERE order_id=?", (order_id,))
+                deleted_count += 1
+                logging.info(f"清理支付订单: {order_id} ({plan_name}), 已保留 {retention_days} 天")
+
+    logging.info(f"总计清理订单: {deleted_count} 条")
+    return deleted_count
+
+def get_retention_days(plan_name: str) -> int:
+    """根据套餐名称返回保留天数"""
+    retention_map = {
+        "1个月会员": 35,
+        "3个月会员": 100,
+        "6个月会员": 200,
+        "1年会员": 400,
+    }
+
+    # 精确匹配
+    if plan_name in retention_map:
+        return retention_map[plan_name]
+
+    # 模糊匹配（兼容可能的变体）
+    if "1个月" in plan_name:
+        return 35
+    elif "3个月" in plan_name:
+        return 100
+    elif "6个月" in plan_name:
+        return 200
+    elif "1年" in plan_name or "一年" in plan_name:
+        return 400
+
+    # 默认保留90天
+    return 90
+
+def update_expired_pending_orders():
+    """将超时的待处理订单标记为过期"""
+    from config import USDT_ORDER_TIMEOUT
+
+    timeout_seconds = USDT_ORDER_TIMEOUT
+    cutoff_time = (now() - timedelta(seconds=timeout_seconds)).isoformat()
+
+    updated = db_execute("""
+        UPDATE usdt_orders 
+        SET status = 'expired' 
+        WHERE status = 'pending' 
+        AND created_at < ?
+    """, (cutoff_time,)).rowcount
+
+    if updated > 0:
+        logging.info(f"已将 {updated} 个超时待处理订单标记为过期")
+
+    return updated
