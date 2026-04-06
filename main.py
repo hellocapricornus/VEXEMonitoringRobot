@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import logging
-
+import datetime as dt
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -138,16 +138,36 @@ def main():
 
     # ================= 定时任务 =================
     if app.job_queue:
+        # 原有的任务
         app.job_queue.run_repeating(check_expired, interval=30, first=5)
 
-        # 清理过期订单的定时任务
         async def clean_orders_job(context):
             clean_expired_orders()
 
         app.job_queue.run_repeating(clean_orders_job, interval=300, first=10)
-        logging.info("定时任务已启动")
-    else:
-        logging.warning("JobQueue 不可用，定时任务未启动")
+
+        # 新增：每天凌晨3点清理旧订单
+        from database import clean_old_orders, update_expired_pending_orders
+
+        async def clean_database_job(context):
+            """定时清理数据库任务"""
+            logging.info("开始执行数据库清理任务...")
+
+            # 1. 先将超时的待处理订单转为过期
+            updated = update_expired_pending_orders()
+            logging.info(f"已将 {updated} 个超时订单转为过期")
+
+            # 2. 清理旧订单
+            deleted = clean_old_orders()
+            logging.info(f"数据库清理完成，共删除 {deleted} 条记录")
+
+        # 设置每天凌晨3点执行
+        app.job_queue.run_daily(
+            clean_database_job,
+            time=dt.time(hour=3, minute=0),
+            days=tuple(range(7))  # 每天执行
+        )
+        logging.info("数据库定时清理任务已启动（每天凌晨3点）")
 
     # 启动时恢复待处理订单
     from handlers.user import restore_orders_on_startup
