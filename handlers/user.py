@@ -606,14 +606,15 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     name, days, base_price = USDT_PLANS[plan_id]
 
-    # 清理该用户的旧订单
+    # 清理该用户的旧订单时，标记为 cancelled 而不是直接删除
     for amount_str, order in list(pending_usdt_orders.items()):
         if order["user_id"] == user_id:
             old_order = pending_usdt_orders[amount_str]
+            # 标记为取消状态
             db_execute("""
                 UPDATE usdt_orders 
                 SET status='cancelled' 
-                WHERE order_id=?
+                WHERE order_id=? AND status='pending'
             """, (old_order["order_id"],))
             del pending_usdt_orders[amount_str]
 
