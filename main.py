@@ -62,6 +62,8 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 
+# main.py - 修改消息处理器部分
+
 def main():
     # 初始化数据库
     init_db()
@@ -69,35 +71,32 @@ def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     # ================= 命令 =================
-    # 用户命令（私聊）
     app.add_handler(CommandHandler("start", start))
-    # 管理员命令
     app.add_handler(CommandHandler("add_trial", cmd_add_trial))
     app.add_handler(CommandHandler("add_permanent", cmd_add_permanent))
     app.add_handler(CommandHandler("extend", cmd_extend))
     app.add_handler(CommandHandler("kick", cmd_kick))
     app.add_handler(CommandHandler("unban", cmd_unban))
-    #app.add_handler(CommandHandler("delete_member", cmd_delete_member))
     app.add_handler(CommandHandler("reply", admin_reply_command))
 
-    # ================= 消息处理器 =================
-    # 1. 处理管理员回复用户的消息（只处理管理员的私聊消息）
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE, 
-        handle_admin_reply
-    ))
-
-    # 2. 处理用户发送给管理员的消息（只处理非管理员的私聊消息）
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & ~filters.Chat(chat_id=ADMIN_ID), 
-        handle_user_message
-    ))
-
-    # 3. 处理广播消息
+    # ================= 消息处理器 - 调整优先级 =================
+    # 1. 广播消息处理器（最高优先级，group=1）
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE,
         handle_broadcast
-    ))
+    ), group=1)
+
+    # 2. 管理员回复处理器（中等优先级，group=2）
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE, 
+        handle_admin_reply
+    ), group=2)
+
+    # 3. 用户消息处理器（最低优先级，group=3）
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & ~filters.Chat(chat_id=ADMIN_ID), 
+        handle_user_message
+    ), group=3)
 
     # ================= 群组消息事件 =================
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member_handler))
@@ -105,7 +104,6 @@ def main():
 
     # ================= 入群申请 =================
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
-    logging.info("已注册 ChatJoinRequestHandler")
 
     # ================= 回调 =================
     # 用户回调
@@ -129,7 +127,6 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_extend, pattern="^admin_extend$"))
     app.add_handler(CallbackQueryHandler(admin_kick, pattern="^admin_kick$"))
     app.add_handler(CallbackQueryHandler(admin_unban, pattern="^admin_unban$"))
-    #app.add_handler(CallbackQueryHandler(admin_delete_member, pattern="^admin_delete_member$"))
     app.add_handler(CallbackQueryHandler(admin_members, pattern="^admin_members$"))
     app.add_handler(CallbackQueryHandler(admin_trials, pattern="^admin_trials$"))
     app.add_handler(CallbackQueryHandler(admin_banned, pattern="^admin_banned$"))
@@ -143,7 +140,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(check_expired, interval=30, first=5)
 
-        # 修复：将 lambda 改为普通函数
+        # 清理过期订单的定时任务
         async def clean_orders_job(context):
             clean_expired_orders()
 
@@ -151,6 +148,10 @@ def main():
         logging.info("定时任务已启动")
     else:
         logging.warning("JobQueue 不可用，定时任务未启动")
+
+    # 启动时恢复待处理订单
+    from handlers.user import restore_orders_on_startup
+    restore_orders_on_startup()
 
     logging.info("机器人启动，使用 polling 模式")
     app.run_polling()
