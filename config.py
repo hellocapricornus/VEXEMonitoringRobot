@@ -3,7 +3,7 @@ import os
 
 # ================= 配置 =================
 # 🔧 建议生产环境使用环境变量，这里保留原样
-BOT_TOKEN = "8350269629:AAGl3saDMy8M7O5OLW2jogwfp1ERkPhUrRY"
+BOT_TOKEN = "8350269629:AAGFxiocJDeI_kf4l7usP70HcgULc1g-K90"
 ADMIN_ID = 8107909168
 GROUP_ID = -1003878983546
 CHANNEL_ID = -1003539038789
