@@ -12,7 +12,7 @@ BEIJING = pytz.timezone("Asia/Shanghai")
 
 # 🔧 修复：使用绝对路径，确保无论从哪个目录启动都使用同一个数据库
 DB_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(DB_DIR, "bot.db")
+DB_PATH = os.path.join(DB_DIR, "vip.db")
 
 # ================= 线程安全的数据库连接 =================
 # 使用 ThreadLocal 确保每个线程有独立的连接
