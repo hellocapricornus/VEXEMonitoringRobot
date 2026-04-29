@@ -447,8 +447,8 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ 正在发送广播消息，请稍候...")
 
     # 获取所有用户
-    from database import db_execute
-    users = db_execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+    from database import get_all_users_for_broadcast
+    users = get_all_users_for_broadcast()
 
     success_count = 0
     fail_count = 0
