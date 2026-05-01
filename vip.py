@@ -2,6 +2,7 @@
 
 #!/usr/bin/env python3
 import logging
+import asyncio
 import datetime as dt
 import os
 from telegram.ext import (
@@ -13,7 +14,8 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, ADMIN_ID
+from config import BOT_TOKEN, ADMIN_ID, CHANNEL_LINK
+from utils import is_user_following_channel
 from database import init_db
 from handlers.user import (
     start,
@@ -199,6 +201,65 @@ def main():
         if enable_scheduler:
             # 原有的任务
             app.job_queue.run_repeating(check_expired, interval=30, first=5)
+
+            async def check_all_group_members(context):
+                """检查数据库中所有用户的频道关注状态"""
+                from config import GROUP_ID, CHANNEL_ID
+                from database import is_admin as db_is_admin, db_execute
+                from utils import kick_user, is_user_following_channel
+
+                logging.info("开始检查所有用户的频道关注状态...")
+
+                try:
+                    # 从数据库获取所有未被封禁的用户
+                    rows = db_execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+
+                    checked = 0
+                    kicked = 0
+                    for (user_id,) in rows:
+                        if user_id == context.bot.id or db_is_admin(user_id):
+                            continue
+
+                        # 先检查用户是否在群组中
+                        try:
+                            member = await context.bot.get_chat_member(GROUP_ID, user_id)
+                            if member.status not in ["member", "administrator", "creator"]:
+                                continue  # 不在群组，跳过
+                        except:
+                            continue  # 无法获取状态，跳过
+
+                        checked += 1
+                        is_following = await is_user_following_channel(context, user_id)
+
+                        if not is_following:
+                            db_execute("UPDATE users SET needs_channel_check=1 WHERE user_id=?", (user_id,))
+
+                            try:
+                                await context.bot.ban_chat_member(GROUP_ID, user_id)
+                                await context.bot.unban_chat_member(GROUP_ID, user_id)
+                                kicked += 1
+                                logging.info(f"用户 {user_id} 未关注频道，已移除")
+
+                                try:
+                                    await context.bot.send_message(
+                                        user_id,
+                                        f"⚠️ 你被移出了群组，因为你没有关注我们的频道。\n\n"
+                                        f"请关注频道后重新申请加入。\n\n"
+                                        f"👉 {CHANNEL_LINK}"
+                                    )
+                                except:
+                                    pass
+                            except Exception as e:
+                                logging.warning(f"踢出用户 {user_id} 失败: {e}")
+
+                        await asyncio.sleep(0.05)  # 避免频率限制
+
+                    logging.info(f"用户频道检查完成：已检查 {checked} 人，移除 {kicked} 人")
+
+                except Exception as e:
+                    logging.error(f"检查用户频道失败: {e}")
+
+            app.job_queue.run_repeating(check_all_group_members, interval=1800, first=60)
 
             # 新增：每天凌晨3点清理旧订单
             from database import clean_old_orders, update_expired_pending_orders
