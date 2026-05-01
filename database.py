@@ -44,6 +44,39 @@ def now():
 def init_db():
     """初始化所有数据库表"""
 
+    # ================= 套餐表 =================
+    db_execute("""
+        CREATE TABLE IF NOT EXISTS vip_plans (
+            plan_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            days INTEGER NOT NULL,
+            price REAL NOT NULL,
+            is_active INTEGER DEFAULT 1
+        )
+    """)
+
+    # 插入默认套餐（如果表为空）
+    existing = db_execute("SELECT COUNT(*) FROM vip_plans").fetchone()[0]
+    if existing == 0:
+        default_plans = [
+            ("buy_1m", "1个月会员", 30, 40),
+            ("buy_3m", "3个月会员", 90, 98),
+            ("buy_6m", "6个月会员", 180, 160),
+            ("buy_1y", "1年会员", 365, 288),
+        ]
+        for plan_id, name, days, price in default_plans:
+            db_execute("INSERT INTO vip_plans (plan_id, name, days, price) VALUES (?, ?, ?, ?)",
+                       (plan_id, name, days, price))
+
+    # ================= 地址池表 =================
+    db_execute("""
+        CREATE TABLE IF NOT EXISTS vip_addresses (
+            address TEXT PRIMARY KEY,
+            status TEXT DEFAULT 'idle',
+            added_at TEXT
+        )
+    """)
+
     # 用户表
     db_execute("""
     CREATE TABLE IF NOT EXISTS users (
@@ -122,6 +155,12 @@ def init_db():
         ("users", "needs_channel_check", "INTEGER DEFAULT 0"),
         ("users", "reminded_type", "TEXT DEFAULT NULL"),
     ]
+    # 在 init_db() 的 columns_to_add 部分添加
+    try:
+        db_execute("ALTER TABLE usdt_orders ADD COLUMN address TEXT DEFAULT ''")
+        logging.info("已添加 usdt_orders.address 字段")
+    except sqlite3.OperationalError:
+        pass
 
     for table, column, col_type in columns_to_add:
         try:
@@ -440,11 +479,15 @@ def clean_old_orders():
 
 
 def update_expired_pending_orders():
-    """将超时的待处理订单标记为过期"""
     from config import USDT_ORDER_TIMEOUT
-
     timeout_seconds = USDT_ORDER_TIMEOUT
     cutoff_time = (now() - timedelta(seconds=timeout_seconds)).isoformat()
+
+    # ✅ 先获取要过期的订单地址，用于释放
+    expired_orders = db_execute("""
+        SELECT order_id, plan_name FROM usdt_orders 
+        WHERE status = 'pending' AND created_at < ?
+    """, (cutoff_time,)).fetchall()
 
     updated = db_execute("""
         UPDATE usdt_orders 
@@ -455,5 +498,57 @@ def update_expired_pending_orders():
 
     if updated > 0:
         logging.info(f"已将 {updated} 个超时待处理订单标记为过期")
+        # ✅ 注意：这里无法获取 address 字段（usdt_orders 表没存地址）
+        # 需要先在 usdt_orders 表中添加 address 字段
 
     return updated
+
+# database.py - 末尾添加
+
+def get_active_plans():
+    """获取所有启用的套餐"""
+    rows = db_execute("SELECT plan_id, name, days, price FROM vip_plans WHERE is_active=1 ORDER BY price").fetchall()
+    return [{"plan_id": r[0], "name": r[1], "days": r[2], "price": r[3]} for r in rows]
+
+def get_all_plans():
+    """获取所有套餐（包括禁用的）"""
+    rows = db_execute("SELECT plan_id, name, days, price, is_active FROM vip_plans ORDER BY plan_id").fetchall()
+    return [{"plan_id": r[0], "name": r[1], "days": r[2], "price": r[3], "is_active": r[4]} for r in rows]
+
+def add_plan(plan_id: str, name: str, days: int, price: float):
+    """添加套餐"""
+    db_execute("INSERT OR IGNORE INTO vip_plans (plan_id, name, days, price) VALUES (?, ?, ?, ?)",
+               (plan_id, name, days, price))
+
+def delete_plan(plan_id: str):
+    """删除套餐"""
+    db_execute("DELETE FROM vip_plans WHERE plan_id=?", (plan_id,))
+
+def toggle_plan(plan_id: str):
+    """启用/禁用套餐"""
+    row = db_execute("SELECT is_active FROM vip_plans WHERE plan_id=?", (plan_id,)).fetchone()
+    if row:
+        new_state = 0 if row[0] else 1
+        db_execute("UPDATE vip_plans SET is_active=? WHERE plan_id=?", (new_state, plan_id))
+
+def get_available_address():
+    """获取空闲地址"""
+    row = db_execute("SELECT address FROM vip_addresses WHERE status='idle' LIMIT 1").fetchone()
+    return row[0] if row else None
+
+def mark_address_used(address: str):
+    """标记地址已使用"""
+    db_execute("UPDATE vip_addresses SET status='used' WHERE address=?", (address,))
+
+def mark_address_idle(address: str):
+    """标记地址为空闲"""
+    db_execute("UPDATE vip_addresses SET status='idle' WHERE address=?", (address,))
+
+def add_address(address: str):
+    """添加收款地址"""
+    db_execute("INSERT OR IGNORE INTO vip_addresses (address, status, added_at) VALUES (?, 'idle', ?)",
+               (address, now().isoformat()))
+
+def delete_address(address: str):
+    """删除收款地址"""
+    db_execute("DELETE FROM vip_addresses WHERE address=?", (address,))
