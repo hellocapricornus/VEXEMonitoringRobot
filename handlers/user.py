@@ -15,9 +15,9 @@ from database import db_execute, now
 
 from config import (
     TRIAL_HOURS, CHANNEL_LINK, GROUP_LINK, ADMIN_ID, GROUP_ID,
-    USDT_WALLET_ADDRESS, USDT_ORDER_TIMEOUT, USDT_PLANS
+    USDT_WALLET_ADDRESS, USDT_ORDER_TIMEOUT
 )
-from database import now, BEIJING, get_user, get_user_status, is_admin, is_user_following_channel, has_valid_membership, save_message, extend_member, unban_user, db_execute, add_trial, get_pending_orders
+from database import now, BEIJING, get_user, get_user_status, is_admin, is_user_following_channel, has_valid_membership, save_message, extend_member, unban_user, db_execute, add_trial, get_pending_orders, mark_address_idle, mark_address_used, get_available_address
 from utils import send_temp
 
 # ================= 全局变量 =================
@@ -52,12 +52,6 @@ def restore_orders_on_startup():
         logging.info(f"恢复订单: {amount_key} - 用户 {user_id}")
 
     logging.info(f"共恢复 {len(pending_usdt_orders)} 个待处理订单")
-
-    # 启动时检查所有恢复订单的支付状态
-    if pending_usdt_orders:
-        logging.info("启动时检查待处理订单的支付状态...")
-        import asyncio
-        asyncio.create_task(check_all_pending_orders_on_startup())
 
 async def check_all_pending_orders_on_startup():
     """启动时检查所有待处理订单的支付状态"""
@@ -295,19 +289,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if is_admin(user_id):
         keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 统计", callback_data="admin_stats"),
-             InlineKeyboardButton("➕ 添加临时会员", callback_data="admin_add_trial")],
-            [InlineKeyboardButton("⭐ 添加永久会员", callback_data="admin_add_permanent"),
-             InlineKeyboardButton("⏰ 延长会员时间", callback_data="admin_extend")],
-            [InlineKeyboardButton("👢 踢出用户", callback_data="admin_kick"),
-             InlineKeyboardButton("🔓 解封用户", callback_data="admin_unban")],
-            [InlineKeyboardButton("📋 会员列表", callback_data="admin_members"),
-             InlineKeyboardButton("🧪 试用列表", callback_data="admin_trials"),
-             InlineKeyboardButton("🚫 封禁列表", callback_data="admin_banned")],
-            [InlineKeyboardButton("💎 USDT(待处理)", callback_data="admin_usdt_orders"),
-             InlineKeyboardButton("📜 USDT(历史)", callback_data="admin_usdt_orders_history")],
-            [InlineKeyboardButton("💬 回复用户", callback_data="admin_reply"),
-             InlineKeyboardButton("📢 广播消息", callback_data="admin_broadcast")]
+            [InlineKeyboardButton("📊 数据统计", callback_data="admin_stats")],
+            [InlineKeyboardButton("👥 用户管理", callback_data="admin_user_manage"),
+             InlineKeyboardButton("💳 会员管理", callback_data="admin_member_manage")],
+            [InlineKeyboardButton("💎 USDT订单", callback_data="admin_usdt_orders"),
+             InlineKeyboardButton("📜 订单历史", callback_data="admin_usdt_orders_history")],
+            [InlineKeyboardButton("📦 套餐管理", callback_data="admin_plans"),
+             InlineKeyboardButton("🏦 地址管理", callback_data="admin_addresses")],
+            [InlineKeyboardButton("📢 广播消息", callback_data="admin_broadcast"),
+             InlineKeyboardButton("💬 回复用户", callback_data="admin_reply")],
         ])
         await update.message.reply_text("👑 管理员菜单", reply_markup=keyboard)
         return
@@ -566,6 +556,19 @@ async def back_to_user_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     user_id = query.from_user.id
 
+    # ✅ 取消该用户的待支付订单并释放地址
+    from database import mark_address_idle
+    for amount_str, order in list(pending_usdt_orders.items()):
+        if order["user_id"] == user_id:
+            db_execute("""
+                UPDATE usdt_orders 
+                SET status='cancelled' 
+                WHERE order_id=? AND status='pending'
+            """, (order["order_id"],))
+            if "address" in order:
+                mark_address_idle(order["address"])
+            del pending_usdt_orders[amount_str]
+
     is_following = await is_user_following_channel(context, user_id)
 
     if not is_following:
@@ -604,10 +607,8 @@ async def restart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= USDT 支付 =================
 async def user_buy_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """USDT 购买会员 - 显示套餐"""
     query = update.callback_query
     await query.answer()
-
     user_id = query.from_user.id
 
     is_following = await is_user_following_channel(context, user_id)
@@ -622,16 +623,41 @@ async def user_buy_usdt(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # ✅ 检查地址池
+    from database import get_active_plans, get_available_address
+    address = get_available_address()
+    if not address:
+        await query.edit_message_text(
+            "😔 支付通道暂未开放，请联系管理员添加收款地址。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ 返回", callback_data="back_to_user_menu")]
+            ])
+        )
+        return
+
+    # ✅ 检查套餐
+    plans = get_active_plans()
+    if not plans:
+        await query.edit_message_text(
+            "📭 暂无可用的会员套餐，请联系管理员添加。",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ 返回", callback_data="back_to_user_menu")]
+            ])
+        )
+        return
+
     keyboard = []
-    for plan_id, (name, days, price) in USDT_PLANS.items():
-        keyboard.append([InlineKeyboardButton(f"{name} - {price} USDT", callback_data=f"usdt_plan_{plan_id}")])
+    for plan in plans:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{plan['name']} - {plan['price']} USDT", 
+                callback_data=f"usdt_plan_{plan['plan_id']}"
+            )
+        ])
     keyboard.append([InlineKeyboardButton("◀️ 返回", callback_data="back_to_user_menu")])
 
     await query.edit_message_text(
-        "💎 **购买会员（USDT 支付）**\n\n"
-        "请选择套餐，支付使用 **USDT (TRC20 网络)**：\n\n"
-        "💡 选择后我会生成一个**专属转账金额**，请按精确金额转账。\n"
-        "⏰ 请在 **10分钟** 内完成支付，超时需重新获取金额。",
+        "💎 **购买会员（USDT 支付）**\n\n请选择套餐：",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
@@ -644,27 +670,45 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = query.from_user.id
     plan_id = query.data.replace("usdt_plan_", "")
 
-    if plan_id not in USDT_PLANS:
+    # ✅ 从数据库获取套餐
+    from database import get_active_plans, get_available_address, mark_address_used
+    plans = get_active_plans()
+    plan = next((p for p in plans if p['plan_id'] == plan_id), None)
+
+    if not plan:
+        await query.answer("套餐不存在", show_alert=True)
         return
 
-    name, days, base_price = USDT_PLANS[plan_id]
+    name = plan['name']
+    days = plan['days']
+    base_price = plan['price']
 
-    # 清理该用户的旧订单时，标记为 cancelled 而不是直接删除
+    # 清理该用户的旧订单
     for amount_str, order in list(pending_usdt_orders.items()):
         if order["user_id"] == user_id:
             old_order = pending_usdt_orders[amount_str]
-            # 标记为取消状态
             db_execute("""
                 UPDATE usdt_orders 
                 SET status='cancelled' 
                 WHERE order_id=? AND status='pending'
             """, (old_order["order_id"],))
+            # ✅ 释放旧订单地址
+            if "address" in old_order:
+                mark_address_idle(old_order["address"])
             del pending_usdt_orders[amount_str]
 
-    # 生成唯一金额（使用修复后的函数）
+    # 获取可用地址
+    address = get_available_address()
+    if not address:
+        await query.edit_message_text("😔 支付通道繁忙，请稍后重试。")
+        return
+
+    mark_address_used(address)
+
+    # 生成唯一金额
     unique_amount = generate_unique_amount(base_price, user_id)
     order_id = f"{user_id}_{int(time.time())}_{random.randint(1000, 9999)}"
-    amount_key = f"{unique_amount:.2f}" 
+    amount_key = f"{unique_amount:.2f}"
 
     # 存储到内存
     pending_usdt_orders[amount_key] = {
@@ -675,14 +719,15 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         "plan_name": name,
         "plan_id": plan_id,
         "status": "pending",
-        "created_at": time.time()
+        "created_at": time.time(),
+        "address": address
     }
 
     # 存储到数据库
     db_execute("""
-        INSERT INTO usdt_orders (order_id, user_id, plan_name, days, amount, status, created_at)
-        VALUES (?, ?, ?, ?, ?, 'pending', ?)
-    """, (order_id, user_id, name, days, unique_amount, now().isoformat()))
+        INSERT INTO usdt_orders (order_id, user_id, plan_name, days, amount, status, created_at, address)
+        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+    """, (order_id, user_id, name, days, unique_amount, now().isoformat(), address))
 
     # 清理过期订单
     clean_expired_orders()
@@ -696,7 +741,7 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"💎 **{name}** - {unique_amount:.2f} USDT\n\n"
         f"📌 **转账信息**\n"
         f"网络：**TRC20**\n"
-        f"地址：`{USDT_WALLET_ADDRESS}`\n"
+        f"地址：`{address}`\n"
         f"金额：**{unique_amount:.2f} USDT**\n\n"
         f"📝 **订单号**：`{order_id}`\n\n"
         f"⚠️ **重要提示**\n"
@@ -710,7 +755,6 @@ async def usdt_plan_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 def clean_expired_orders():
-    """清理超时订单"""
     from config import USDT_ORDER_TIMEOUT
     import time
     import logging
@@ -720,12 +764,15 @@ def clean_expired_orders():
     for amount_key, order in list(pending_usdt_orders.items()):
         if current_time - order["created_at"] > USDT_ORDER_TIMEOUT:
             expired_keys.append(amount_key)
-            from database import db_execute
             db_execute("""
                 UPDATE usdt_orders 
                 SET status='expired' 
                 WHERE order_id=? AND status='pending'
             """, (order["order_id"],))
+            # ✅ 释放地址
+            if "address" in order:
+                mark_address_idle(order["address"])
+                logging.info(f"订单 {order['order_id']} 过期，释放地址 {order['address']}")
     for key in expired_keys:
         del pending_usdt_orders[key]
         logging.info(f"清理过期订单: {key}")
@@ -816,6 +863,11 @@ async def check_usdt_payment_callback(update: Update, context: ContextTypes.DEFA
 
         # 7. 标记交易已处理
         mark_transaction_processed(result["tx_id"], user_id, order["days"])
+
+        # ✅ 释放地址
+        from database import mark_address_idle
+        if "address" in order:
+            mark_address_idle(order["address"])
 
         # 8. 删除内存中的订单
         del pending_usdt_orders[amount_key]
