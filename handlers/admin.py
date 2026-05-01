@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from config import GROUP_ID, ADMIN_ID, CHANNEL_LINK, GROUP_LINK, TRIAL_HOURS
 from database import is_admin, add_trial, add_permanent, extend_member, ban_user, unban_user, get_user, db_execute, now, save_message, remove_permanent, delete_user_membership, log_admin_action
 from utils import kick_user, is_user_following_channel
+from datetime import datetime, timedelta
 
 # ================= 添加输入验证的辅助函数 =================
 def parse_user_id(args, arg_index=0) -> tuple:
@@ -193,41 +194,225 @@ async def cmd_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= 管理员回调 =================
 async def back_to_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """返回管理员菜单"""
+    query = update.callback_query
+    await query.answer()
+    context.user_data.pop('replying_to_user', None)
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 数据统计", callback_data="admin_stats")],
+        [InlineKeyboardButton("👥 用户管理", callback_data="admin_user_manage"),
+         InlineKeyboardButton("💳 会员管理", callback_data="admin_member_manage")],
+        [InlineKeyboardButton("💎 USDT订单", callback_data="admin_usdt_orders"),
+         InlineKeyboardButton("📜 订单历史", callback_data="admin_usdt_orders_history")],
+        [InlineKeyboardButton("📦 套餐管理", callback_data="admin_plans"),
+         InlineKeyboardButton("🏦 地址管理", callback_data="admin_addresses")],
+        [InlineKeyboardButton("📢 广播消息", callback_data="admin_broadcast"),
+         InlineKeyboardButton("💬 回复用户", callback_data="admin_reply")],
+    ])
+    await query.edit_message_text("👑 管理员菜单", reply_markup=keyboard)
+
+# ================= 用户管理子菜单 =================
+async def admin_user_manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """用户管理子菜单"""
     query = update.callback_query
     await query.answer()
 
-    context.user_data.pop('replying_to_user', None)
-
-    # ❌ 移除删除会员按钮
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 统计", callback_data="admin_stats"),
-         InlineKeyboardButton("➕ 添加临时会员", callback_data="admin_add_trial")],
-        [InlineKeyboardButton("⭐ 添加永久会员", callback_data="admin_add_permanent"),
-         InlineKeyboardButton("⏰ 延长会员时间", callback_data="admin_extend")],
+        [InlineKeyboardButton("➕ 添加临时", callback_data="admin_add_trial"),
+         InlineKeyboardButton("⭐ 添加永久", callback_data="admin_add_permanent")],
         [InlineKeyboardButton("👢 踢出用户", callback_data="admin_kick"),
          InlineKeyboardButton("🔓 解封用户", callback_data="admin_unban")],
-        [InlineKeyboardButton("📢 广播消息", callback_data="admin_broadcast")],
-        [InlineKeyboardButton("📋 会员列表", callback_data="admin_members"),
-         InlineKeyboardButton("🧪 试用列表", callback_data="admin_trials"),
-         InlineKeyboardButton("🚫 封禁列表", callback_data="admin_banned")],
-        [InlineKeyboardButton("💎 USDT(待处理)", callback_data="admin_usdt_orders"),
-         InlineKeyboardButton("📜 USDT(历史)", callback_data="admin_usdt_orders_history")],
-        [InlineKeyboardButton("💬 回复用户", callback_data="admin_reply")]
+        [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
     ])
-    await query.edit_message_text("👑 管理员菜单", reply_markup=keyboard)
+    await query.edit_message_text("👥 用户管理\n\n选择操作：", reply_markup=keyboard)
+
+
+# ================= 会员管理子菜单 =================
+async def admin_member_manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """会员管理子菜单"""
+    query = update.callback_query
+    await query.answer()
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 会员列表", callback_data="admin_members"),
+         InlineKeyboardButton("🧪 试用列表", callback_data="admin_trials")],
+        [InlineKeyboardButton("🚫 封禁列表", callback_data="admin_banned")],
+        [InlineKeyboardButton("⏰ 延长会员", callback_data="admin_extend")],
+        [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
+    ])
+    await query.edit_message_text("💳 会员管理\n\n选择操作：", reply_markup=keyboard)
+
+
+# ================= 套餐管理回调 =================
+async def admin_plans_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    from database import get_all_plans
+    plans = get_all_plans()
+
+    if not plans:
+        await query.edit_message_text(
+            "📭 **暂无套餐**\n\n"
+            "💡 **添加套餐**\n"
+            "`/addplan 套餐ID 名称 天数 价格`\n"
+            "例如：`/addplan buy_1m 月度会员 30 40`\n\n"
+            "💡 **删除套餐**\n"
+            "`/delplan 套餐ID`\n"
+            "例如：`/delplan buy_1m`\n\n"
+            "💡 **启/禁套餐**\n"
+            "`/toggleplan 套餐ID`\n"
+            "例如：`/toggleplan buy_1m`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
+            ])
+        )
+        return
+
+    text = "📦 **套餐列表**\n\n"
+    for p in plans:
+        status = "✅ 启用" if p['is_active'] else "❌ 禁用"
+        text += f"{status} | `{p['plan_id']}`\n"
+        text += f"  📛 {p['name']}\n"
+        text += f"  💰 {p['price']} USDT / {p['days']}天\n\n"
+
+    text += (
+        "💡 **管理命令**\n"
+        "`/addplan 套餐ID 名称 天数 价格` - 添加\n"
+        "`/delplan 套餐ID` - 删除\n"
+        "`/toggleplan 套餐ID` - 启用/禁用"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
+        ])
+    )
+
+# ================= 地址管理回调 =================
+async def admin_addresses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    from database import db_execute
+    rows = db_execute("SELECT address, status FROM vip_addresses ORDER BY added_at").fetchall()
+
+    if not rows:
+        await query.edit_message_text(
+            "📭 **暂无收款地址**\n\n"
+            "💡 **添加地址**\n"
+            "`/addaddr TRC20地址`\n"
+            "例如：`/addaddr TWYctLLCbvavefuCqRXxgKzS7hVe6cpbp9`\n\n"
+            "💡 **删除地址**\n"
+            "`/deladdr TRC20地址`\n"
+            "例如：`/deladdr TWYctLLCbvavefuCqRXxgKzS7hVe6cpbp9`\n\n"
+            "⚠️ 只能添加 TRC20 网络地址（T开头，34位）",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
+            ])
+        )
+        return
+
+    idle_count = sum(1 for _, s in rows if s == 'idle')
+    used_count = len(rows) - idle_count
+
+    text = f"🏦 **收款地址池**\n\n🟢 空闲：{idle_count} | 🔴 使用中：{used_count}\n\n"
+    for addr, status in rows:
+        icon = "🟢" if status == "idle" else "🔴"
+        text += f"{icon} `{addr}`\n"
+
+    text += (
+        "\n💡 **管理命令**\n"
+        "`/addaddr TRC20地址` - 添加\n"
+        "`/deladdr TRC20地址` - 删除"
+    )
+
+    await query.edit_message_text(
+        text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
+        ])
+    )
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     from database import db_execute
+    from datetime import datetime
+
     total_users = db_execute("SELECT COUNT(*) FROM users").fetchone()[0]
     trial_users = db_execute("SELECT COUNT(*) FROM users WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0 AND is_banned=0").fetchone()[0]
     paid_users = db_execute("SELECT COUNT(*) FROM users WHERE expire_time IS NOT NULL AND is_permanent=0 AND is_banned=0").fetchone()[0]
     permanent = db_execute("SELECT COUNT(*) FROM users WHERE is_permanent=1 AND is_banned=0").fetchone()[0]
     banned = db_execute("SELECT COUNT(*) FROM banned").fetchone()[0]
-    text = f"📊 统计\n总用户: {total_users}\n试用中: {trial_users}\n付费会员: {paid_users}\n永久会员: {permanent}\n封禁: {banned}"
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
+
+    text = f"📊 **数据统计**\n\n"
+    text += f"总用户：{total_users}\n"
+    text += f"试用中：{trial_users}\n"
+    text += f"付费会员：{paid_users}\n"
+    text += f"永久会员：{permanent}\n"
+    text += f"封禁：{banned}\n\n"
+
+    # ✅ 显示付费用户详情
+    members = db_execute("""
+        SELECT user_id, expire_time, is_permanent 
+        FROM users 
+        WHERE (expire_time IS NOT NULL OR is_permanent=1) AND is_banned=0
+        ORDER BY expire_time ASC
+    """).fetchall()
+
+    if members:
+        text += "━━━━━━━━━━━━\n📋 **付费用户详情**\n\n"
+        for uid, exp, perm in members:
+            try:
+                user = await context.bot.get_chat(uid)
+                name = user.full_name or "未知"
+                username = f" @{user.username}" if user.username else ""
+                display = f"{name}{username}"
+            except:
+                display = str(uid)
+
+            if perm:
+                text += f"• {display}\n  🆔 `{uid}` | 永久会员\n\n"
+            elif exp:
+                exp_date = datetime.fromisoformat(exp).strftime("%Y-%m-%d %H:%M")
+                text += f"• {display}\n  🆔 `{uid}` | 到期 {exp_date}\n\n"
+
+    # ✅ 显示试用用户详情
+    trials = db_execute("""
+        SELECT user_id, trial_start_time 
+        FROM users 
+        WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0 AND is_banned=0
+        ORDER BY trial_start_time ASC
+    """).fetchall()
+
+    if trials:
+        text += "━━━━━━━━━━━━\n🧪 **试用用户详情**\n\n"
+        for uid, start in trials:
+            try:
+                user = await context.bot.get_chat(uid)
+                name = user.full_name or "未知"
+                username = f" @{user.username}" if user.username else ""
+                display = f"{name}{username}"
+            except:
+                display = str(uid)
+
+            start_time = datetime.fromisoformat(start)
+            end_time = start_time + timedelta(hours=TRIAL_HOURS)
+            text += f"• {display}\n  🆔 `{uid}` | 到期 {end_time.strftime('%Y-%m-%d %H:%M')}\n\n"
+
+    await query.edit_message_text(
+        text, 
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
+        ])
+    )
 
 async def admin_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -674,6 +859,11 @@ async def admin_confirm_usdt_callback(update: Update, context: ContextTypes.DEFA
         WHERE order_id=?
     """, (now().isoformat(), order["order_id"]))
 
+    # ✅ 释放地址
+    from database import mark_address_idle
+    if "address" in order:
+        mark_address_idle(order["address"])
+
     # 6. 删除内存中的订单
     del pending_usdt_orders[amount_key]
 
@@ -759,3 +949,57 @@ async def admin_usdt_orders_history_callback(update: Update, context: ContextTyp
             [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
         ])
     )
+
+# admin.py 末尾添加
+
+async def cmd_add_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    args = context.args
+    if len(args) < 4:
+        await update.message.reply_text("用法: /addplan 套餐ID 名称 天数 价格\n例如: /addplan buy_1m 月度会员 30 40")
+        return
+    plan_id, name, days, price = args[0], args[1], int(args[2]), float(args[3])
+    from database import add_plan
+    add_plan(plan_id, name, days, price)
+    await update.message.reply_text(f"✅ 已添加套餐: {name} - {price} USDT / {days}天")
+
+async def cmd_del_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("用法: /delplan 套餐ID")
+        return
+    from database import delete_plan
+    delete_plan(context.args[0])
+    await update.message.reply_text(f"✅ 已删除套餐: {context.args[0]}")
+
+async def cmd_toggle_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("用法: /toggleplan 套餐ID")
+        return
+    from database import toggle_plan
+    toggle_plan(context.args[0])
+    await update.message.reply_text(f"✅ 已切换套餐状态: {context.args[0]}")
+
+async def cmd_add_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("用法: /addaddr TRC20地址")
+        return
+    from database import add_address
+    add_address(context.args[0])
+    await update.message.reply_text(f"✅ 已添加地址: {context.args[0]}")
+
+async def cmd_del_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    if not context.args:
+        await update.message.reply_text("用法: /deladdr TRC20地址")
+        return
+    from database import delete_address
+    delete_address(context.args[0])
+    await update.message.reply_text(f"✅ 已删除地址: {context.args[0]}")
