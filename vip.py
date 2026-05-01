@@ -55,6 +55,15 @@ from handlers.admin import (
     admin_broadcast_callback,
     handle_broadcast,
     cmd_check_user,
+    cmd_add_plan,           # ✅ 新增
+    cmd_del_plan,           # ✅ 新增
+    cmd_toggle_plan,        # ✅ 新增
+    cmd_add_address,        # ✅ 新增
+    cmd_del_address,        # ✅ 新增
+    admin_user_manage_callback,
+    admin_member_manage_callback,
+    admin_plans_callback,
+    admin_addresses_callback,
 )
 from handlers.group import new_member_handler, left_member_handler
 from handlers.join_request import handle_join_request
@@ -111,6 +120,14 @@ def main():
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("reply", admin_reply_command))
     app.add_handler(CommandHandler("check_user", cmd_check_user))
+    # ✅ 套餐和地址管理
+    app.add_handler(CommandHandler("addplan", cmd_add_plan))
+    app.add_handler(CommandHandler("delplan", cmd_del_plan))
+    app.add_handler(CommandHandler("toggleplan", cmd_toggle_plan))
+    app.add_handler(CommandHandler("addaddr", cmd_add_address))
+    app.add_handler(CommandHandler("deladdr", cmd_del_address))
+
+    
 
     # ================= 消息处理器 - 调整优先级 =================
     # 1. 广播消息处理器（最高优先级，group=1）
@@ -168,6 +185,11 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_usdt_orders_history_callback, pattern="^admin_usdt_orders_history$"))
     app.add_handler(CallbackQueryHandler(admin_confirm_usdt_callback, pattern="^admin_confirm_usdt_"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
+    # 新增子菜单回调
+    app.add_handler(CallbackQueryHandler(admin_user_manage_callback, pattern="^admin_user_manage$"))
+    app.add_handler(CallbackQueryHandler(admin_member_manage_callback, pattern="^admin_member_manage$"))
+    app.add_handler(CallbackQueryHandler(admin_plans_callback, pattern="^admin_plans$"))
+    app.add_handler(CallbackQueryHandler(admin_addresses_callback, pattern="^admin_addresses$"))
 
     # ================= 定时任务 =================
     if app.job_queue:
@@ -178,38 +200,52 @@ def main():
             # 原有的任务
             app.job_queue.run_repeating(check_expired, interval=30, first=5)
 
-            async def clean_orders_job(context):
-                clean_expired_orders()
-
-            app.job_queue.run_repeating(clean_orders_job, interval=300, first=10)
-
             # 新增：每天凌晨3点清理旧订单
             from database import clean_old_orders, update_expired_pending_orders
 
             async def clean_database_job(context):
-                """定时清理数据库任务"""
+                """定时清理数据库任务 - 包含释放过期地址"""
+                import logging
+                from database import db_execute, mark_address_idle, update_expired_pending_orders, clean_old_orders
+
                 logging.info(f"Worker {WORKER_ID}: 开始执行数据库清理任务...")
 
                 # 1. 先将超时的待处理订单转为过期
                 updated = update_expired_pending_orders()
                 logging.info(f"已将 {updated} 个超时订单转为过期")
 
-                # 2. 清理旧订单
+                # 2. 释放过期/取消订单占用的地址
+                expired_with_address = db_execute("""
+                    SELECT DISTINCT address FROM usdt_orders 
+                    WHERE status IN ('expired', 'cancelled') AND address IS NOT NULL AND address != ''
+                """).fetchall()
+
+                released = 0
+                for (address,) in expired_with_address:
+                    # 检查这个地址是否还有其他 pending 订单在用
+                    still_in_use = db_execute("""
+                        SELECT COUNT(*) FROM usdt_orders 
+                        WHERE address = ? AND status = 'pending'
+                    """, (address,)).fetchone()[0]
+
+                    if still_in_use == 0:
+                        mark_address_idle(address)
+                        released += 1
+                        logging.info(f"释放地址: {address}")
+
+                if released > 0:
+                    logging.info(f"已释放 {released} 个过期订单地址")
+
+                # 3. 清理旧订单
                 deleted = clean_old_orders()
                 logging.info(f"数据库清理完成，共删除 {deleted} 条记录")
 
-            # 设置每天凌晨3点执行
-            app.job_queue.run_daily(
-                clean_database_job,
-                time=dt.time(hour=3, minute=0),
-                days=tuple(range(7))
-            )
-            logging.info("数据库定时清理任务已启动（每天凌晨3点）")
-        else:
-            logging.info("定时任务已禁用（ENABLE_SCHEDULER=false）")
+            # ✅ 注册定时任务（每5分钟检查一次释放地址，每天凌晨3点清理旧订单）
+            app.job_queue.run_repeating(clean_database_job, interval=300, first=15)
+            app.job_queue.run_daily(clean_database_job, time=dt.time(hour=3, minute=0), days=tuple(range(7)))
 
-    # 启动时恢复待处理订单
-    from handlers.user import restore_orders_on_startup
+    # 启动时恢复待处理订单（只恢复内存，不检查支付）
+    from handlers.user import restore_orders_on_startup, check_all_pending_orders_on_startup
     restore_orders_on_startup()
 
     logging.info(f"机器人启动 (Worker: {WORKER_ID})，使用 polling 模式")
