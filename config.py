@@ -1,12 +1,14 @@
 # config.py - 添加环境变量支持（token保持原样）
 import os
+from dotenv import load_dotenv
+load_dotenv()
 
 # ================= 配置 =================
 # 🔧 建议生产环境使用环境变量，这里保留原样
-BOT_TOKEN = "8350269629:AAHPfWSIeYmnmqKpClB26ye6AbRZ0dvO2w8"
-ADMIN_ID = 8107909168
-GROUP_ID = -1003878983546
-CHANNEL_ID = -1003539038789
+BOT_TOKEN = os.getenv("VIP_BOT_TOKEN")
+ADMIN_ID = int(os.getenv("VIP_ADMIN", "0"))
+GROUP_ID = int(os.getenv("VIP_GROUP", "0"))
+CHANNEL_ID = int(os.getenv("VIP_CHANNEL", "0"))
 
 # 统一使用 GROUP_ID 和 GROUP_LINK
 GROUP_LINK = "https://t.me/+BjHkQhpqknczYjk5"
