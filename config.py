@@ -1,29 +1,95 @@
-# config.py - 添加环境变量支持（token保持原样）
+# config.py
 import os
 from dotenv import load_dotenv
 load_dotenv()
 
-# ================= 配置 =================
-# 🔧 建议生产环境使用环境变量，这里保留原样
 BOT_TOKEN = os.getenv("VIP_BOT_TOKEN")
 ADMIN_ID = int(os.getenv("VIP_ADMIN", "0"))
-GROUP_ID = int(os.getenv("VIP_GROUP", "0"))
-CHANNEL_ID = int(os.getenv("VIP_CHANNEL", "0"))
-
-# 统一使用 GROUP_ID 和 GROUP_LINK
-GROUP_LINK = "https://t.me/+BjHkQhpqknczYjk5"
-CHANNEL_LINK = "https://t.me/+x_Fm8Eyp-edlNjgx"
-
-# 🔧 修复：正式环境使用正确的值
-TRIAL_HOURS = int(os.environ.get("TRIAL_HOURS", "24"))  # 24小时正式
-REMIND_HOURS = int(os.environ.get("REMIND_HOURS", "3"))  # 3小时正式
-DELETE_DELAY = int(os.environ.get("DELETE_DELAY", "10"))  # 可以调整更长，如30秒
-
-# ================= USDT 支付配置 =================
-USDT_WALLET_ADDRESS = os.getenv("VIP_USDT_ADDRESS", "")
-USDT_ORDER_TIMEOUT = int(os.environ.get("USDT_ORDER_TIMEOUT", "600"))  # 10分钟 = 600秒
 
 
-# 🔧 添加运行环境配置
-ENABLE_SCHEDULER = os.environ.get("ENABLE_SCHEDULER", "true").lower() == "true"
-WORKER_ID = os.environ.get("WORKER_ID", "default")
+# ================= 从数据库动态读取 =================
+def _get_setting(key: str, default: str) -> str:
+    try:
+        from database import db_execute
+        row = db_execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        if row:
+            return row[0]
+    except:
+        pass
+    return default
+
+
+def get_group_id():
+    return int(_get_setting("GROUP_ID", "0"))
+
+def get_channel_id():
+    return int(_get_setting("CHANNEL_ID", "0"))
+
+def get_trial_hours():
+    return float(_get_setting("TRIAL_HOURS", "24"))
+
+def get_remind_hours():
+    return float(_get_setting("REMIND_HOURS", "3"))
+
+def get_usdt_order_timeout():
+    return int(_get_setting("USDT_ORDER_TIMEOUT", "600"))
+
+def get_delete_delay():
+    return int(_get_setting("DELETE_DELAY", "10"))
+
+def get_group_link():
+    return _get_setting("GROUP_LINK", "")
+
+def get_channel_link():
+    return _get_setting("CHANNEL_LINK", "")
+
+def get_member_remind_days():
+    return float(_get_setting("MEMBER_REMIND_DAYS", "3"))
+
+
+# 兼容旧代码的默认值
+GROUP_ID = 0
+CHANNEL_ID = 0
+TRIAL_HOURS = 24
+REMIND_HOURS = 3
+MEMBER_REMIND_DAYS = 3
+USDT_ORDER_TIMEOUT = 600
+DELETE_DELAY = 10
+GROUP_LINK = ""
+CHANNEL_LINK = ""
+USDT_WALLET_ADDRESS = ""
+
+
+def refresh_config():
+    """刷新配置"""
+    global GROUP_ID, CHANNEL_ID, TRIAL_HOURS, REMIND_HOURS
+    global USDT_ORDER_TIMEOUT, DELETE_DELAY, GROUP_LINK, CHANNEL_LINK
+    global MEMBER_REMIND_DAYS
+    MEMBER_REMIND_DAYS = get_member_remind_days()
+
+    GROUP_ID = get_group_id()
+    CHANNEL_ID = get_channel_id()
+    TRIAL_HOURS = get_trial_hours()
+    REMIND_HOURS = get_remind_hours()
+    USDT_ORDER_TIMEOUT = get_usdt_order_timeout()
+    DELETE_DELAY = get_delete_delay()
+
+    db_link = get_group_link()
+    if db_link:
+        GROUP_LINK = db_link
+    elif GROUP_ID:
+        GROUP_LINK = f"https://t.me/+{str(GROUP_ID).replace('-100', '')}"
+    else:
+        GROUP_LINK = ""
+
+    db_channel_link = get_channel_link()
+    if db_channel_link:
+        CHANNEL_LINK = db_channel_link
+    elif CHANNEL_ID:
+        CHANNEL_LINK = f"https://t.me/+{str(CHANNEL_ID).replace('-100', '')}"
+    else:
+        CHANNEL_LINK = ""
+
+
+# 启动时刷新
+refresh_config()
