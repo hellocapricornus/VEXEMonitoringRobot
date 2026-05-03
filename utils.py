@@ -1,9 +1,10 @@
+# utils.py - 完整修复版本
 import asyncio
 import logging
 from telegram.ext import ContextTypes
-
-from config import GROUP_ID, DELETE_DELAY
-from database import db_execute
+import config
+from config import DELETE_DELAY
+from database import db_execute, ban_user
 
 async def send_temp(context: ContextTypes.DEFAULT_TYPE, text: str, chat_id: int, delay: int = DELETE_DELAY):
     """发送临时消息并倒计时删除"""
@@ -20,30 +21,24 @@ async def send_temp(context: ContextTypes.DEFAULT_TYPE, text: str, chat_id: int,
     except:
         pass
 
+
 async def kick_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, reason: str = "未通过验证", ban: bool = True):
-    """踢出用户
+    """踢出用户（不再封禁 Telegram 群组）
 
     Args:
-        ban: True=封禁（禁止重新加入），False=只踢出不封禁
+        ban: True=标记数据库封禁，False=只踢出不标记
     """
-    from database import ban_user, unban_user, db_execute
+    from database import ban_user as db_ban, unban_user, db_execute
     try:
+        # 🔧 只踢出不封禁 Telegram（先 ban 再立即 unban）
+        await context.bot.ban_chat_member(config.GROUP_ID, user_id)
+        await context.bot.unban_chat_member(config.GROUP_ID, user_id)
+
         if ban:
-            # 封禁用户（禁止重新加入）
-            await context.bot.ban_chat_member(GROUP_ID, user_id)
-            logging.info(f"已封禁用户 {user_id}")
-            # 记录到数据库
-            ban_user(user_id, reason)
+            # 在数据库中标记为封禁
+            db_ban(user_id, reason)
+            logging.info(f"已踢出用户 {user_id}，数据库标记封禁")
         else:
-            # 只踢出不封禁（先封禁再立即解封）
-            await context.bot.ban_chat_member(GROUP_ID, user_id)
-            await context.bot.unban_chat_member(GROUP_ID, user_id)
-            # ⚠️ 只踢出不封禁时，不要设置数据库的 is_banned=1
-            # 但需要确保数据库记录存在且 is_banned=0
-            db_execute("""
-                INSERT OR IGNORE INTO users (user_id, is_banned) 
-                VALUES (?, 0)
-            """, (user_id,))
             logging.info(f"已踢出用户 {user_id}（未封禁）")
 
         # 尝试私聊通知
@@ -52,9 +47,9 @@ async def kick_user(context: ContextTypes.DEFAULT_TYPE, user_id: int, reason: st
         except:
             pass
 
-        logging.info(f"踢出用户 {user_id}, 原因: {reason}, 封禁: {ban}")
     except Exception as e:
         logging.error(f"踢人失败 {user_id}: {e}")
+
 
 # 从 database 导入并重新导出
 from database import is_user_following_channel
