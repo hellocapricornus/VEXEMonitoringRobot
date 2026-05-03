@@ -3,23 +3,22 @@ import asyncio
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from config import GROUP_ID, GROUP_LINK
+import config
+from config import DELETE_DELAY
 from database import get_user, is_admin, db_execute
 from utils import send_temp
 
 async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """当有新用户加入群组时 - 只发送欢迎消息"""
-    if update.effective_chat.id != GROUP_ID:
+    """当有新用户加入群组时"""
+    if update.effective_chat.id != config.GROUP_ID:
         return
 
-    # 删除系统消息
     try:
         await update.message.delete()
     except Exception as e:
         logging.warning(f"删除系统消息失败: {e}")
 
     new_members = update.message.new_chat_members
-    logging.info(f"检测到新成员加入事件，新成员数量: {len(new_members)}")
 
     for member in new_members:
         user_id = member.id
@@ -28,35 +27,56 @@ async def new_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             continue
 
         if is_admin(user_id):
-            await context.bot.send_message(GROUP_ID, f"👋 欢迎管理员 {member.full_name}")
+            await send_temp(context, f"👋 欢迎管理员 {member.full_name}", config.GROUP_ID)
             continue
 
-        # 等待一下，确保数据库已更新
         await asyncio.sleep(1)
 
-        # 关键修复：如果用户有会员资格，清除试用期
+        # ✅ 如果数据库没有记录，添加试用
         row = get_user(user_id)
-        if row and row[0]:  # 有 expire_time
-            db_execute("UPDATE users SET trial_start_time=NULL, trial_reminded=0 WHERE user_id=?", (user_id,))
-            logging.info(f"用户 {user_id} 有会员资格，已清除试用期")
+        from database import add_trial as db_add_trial
+        if not row:
+            db_add_trial(user_id)
+            logging.info(f"新成员 {user_id} 入库并添加试用")
 
-        # 获取状态用于欢迎消息
+        # 有付费会员资格，清除试用期
+        if row and row[0]:
+            db_execute("UPDATE users SET trial_start_time=NULL, trial_reminded=0 WHERE user_id=?", (user_id,))
+
         from database import get_user_status
         is_valid, status = get_user_status(user_id)
 
-        # 只发送欢迎消息，不踢人（踢人已在 join_request 中处理）
-        await context.bot.send_message(GROUP_ID, f"👋 欢迎 {member.full_name}\n{status}")
+        await send_temp(context, f"👋 欢迎 {member.full_name}\n{status}", config.GROUP_ID)
+
 
 async def left_member_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理成员离开消息"""
+    """处理成员离开消息 - 自动删除"""
     msg = update.message
     if not msg or not msg.left_chat_member:
         return
-    if msg.chat.id != GROUP_ID:
+    if msg.chat.id != config.GROUP_ID:
         return
 
-    await context.bot.send_message(GROUP_ID, f"⚠️ 用户 {msg.left_chat_member.full_name} 已离开群聊")
+    # ✅ 先删除系统消息
     try:
         await msg.delete()
+    except Exception as e:
+        logging.warning(f"删除离开消息失败: {e}")
+
+    # ✅ 发送可自动删除的临时消息
+    left_user = msg.left_chat_member
+    await send_temp(
+        context,
+        f"⚠️ 用户 {left_user.full_name} 已离开群聊",
+        config.GROUP_ID,
+        delay=DELETE_DELAY
+    )
+
+
+async def auto_delete(message, delay: int):
+    """自动删除消息的辅助函数"""
+    await asyncio.sleep(delay)
+    try:
+        await message.delete()
     except:
         pass
