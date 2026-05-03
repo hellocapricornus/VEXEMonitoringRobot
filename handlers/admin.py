@@ -4,7 +4,8 @@ import asyncio
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
-from config import GROUP_ID, ADMIN_ID, CHANNEL_LINK, GROUP_LINK, TRIAL_HOURS
+import config
+from config import ADMIN_ID
 from database import is_admin, add_trial, add_permanent, extend_member, ban_user, unban_user, get_user, db_execute, now, save_message, remove_permanent, delete_user_membership, log_admin_action
 from utils import kick_user, is_user_following_channel
 from datetime import datetime, timedelta
@@ -35,6 +36,7 @@ def parse_extend_args(args) -> tuple:
 
 # ================= 命令函数 =================
 async def cmd_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
 
@@ -46,17 +48,18 @@ async def cmd_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_trial(uid)
 
     try:
-        member = await context.bot.get_chat_member(GROUP_ID, uid)
+        member = await context.bot.get_chat_member(config.GROUP_ID, uid)
         if member.status in ["left", "kicked"]:
-            await context.bot.unban_chat_member(GROUP_ID, uid)
+            await context.bot.unban_chat_member(config.GROUP_ID, uid)
             logging.info(f"用户 {uid} 已解封")
     except Exception as e:
         logging.warning(f"解封用户 {uid} 失败: {e}")
 
     log_admin_action(update.effective_user.id, "add_trial", uid)
-    await update.message.reply_text(f"✅ 已为用户 {uid} 添加{TRIAL_HOURS}小时试用并解封")
+    await update.message.reply_text(f"✅ 已为用户 {uid} 添加{config.TRIAL_HOURS}小时试用并解封")
 
 async def cmd_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
 
@@ -68,9 +71,9 @@ async def cmd_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     add_permanent(uid)
 
     try:
-        member = await context.bot.get_chat_member(GROUP_ID, uid)
+        member = await context.bot.get_chat_member(config.GROUP_ID, uid)
         if member.status in ["left", "kicked"]:
-            await context.bot.unban_chat_member(GROUP_ID, uid)
+            await context.bot.unban_chat_member(config.GROUP_ID, uid)
             logging.info(f"用户 {uid} 已解封")
     except Exception as e:
         logging.warning(f"解封用户 {uid} 失败: {e}")
@@ -79,6 +82,7 @@ async def cmd_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已将用户 {uid} 设为永久会员并解封")
 
 async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     success, uid, days, error = parse_extend_args(context.args)
@@ -101,9 +105,9 @@ async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     logging.info(f"执行后用户状态: is_valid={is_valid}, status={status}")
 
     try:
-        member = await context.bot.get_chat_member(GROUP_ID, uid)
+        member = await context.bot.get_chat_member(config.GROUP_ID, uid)
         if member.status in ["left", "kicked"]:
-            await context.bot.unban_chat_member(GROUP_ID, uid)
+            await context.bot.unban_chat_member(config.GROUP_ID, uid)
             logging.info(f"用户 {uid} 已被解封")
         else:
             logging.info(f"用户 {uid} 已在群组中，跳过解封操作")
@@ -119,6 +123,7 @@ async def cmd_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     success, uid, error = parse_user_id(context.args)
@@ -133,6 +138,7 @@ async def cmd_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"已踢出并封禁用户 {uid}")
 
 async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     success, uid, error = parse_user_id(context.args)
@@ -141,7 +147,7 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     unban_user(uid)
     try:
-        await context.bot.unban_chat_member(GROUP_ID, uid)
+        await context.bot.unban_chat_member(config.GROUP_ID, uid)
     except:
         pass
 
@@ -154,6 +160,7 @@ async def cmd_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """调试命令：查看用户状态（不会被定时任务删除）"""
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
 
@@ -175,7 +182,7 @@ async def cmd_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # 检查用户在群组中的状态
     try:
-        member = await context.bot.get_chat_member(GROUP_ID, uid)
+        member = await context.bot.get_chat_member(config.GROUP_ID, uid)
         group_status = member.status
     except Exception as e:
         group_status = f"检查失败: {e}"
@@ -194,9 +201,11 @@ async def cmd_check_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= 管理员回调 =================
 async def back_to_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     context.user_data.pop('replying_to_user', None)
+    context.user_data.pop('last_settings_click', None)
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 数据统计", callback_data="admin_stats")],
@@ -208,11 +217,13 @@ async def back_to_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
          InlineKeyboardButton("🏦 地址管理", callback_data="admin_addresses")],
         [InlineKeyboardButton("📢 广播消息", callback_data="admin_broadcast"),
          InlineKeyboardButton("💬 回复用户", callback_data="admin_reply")],
+        [InlineKeyboardButton("⚙️ 系统设置", callback_data="admin_settings")],
     ])
     await query.edit_message_text("👑 管理员菜单", reply_markup=keyboard)
 
 # ================= 用户管理子菜单 =================
 async def admin_user_manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     """用户管理子菜单"""
     query = update.callback_query
     await query.answer()
@@ -225,10 +236,9 @@ async def admin_user_manage_callback(update: Update, context: ContextTypes.DEFAU
         [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
     ])
     await query.edit_message_text("👥 用户管理\n\n选择操作：", reply_markup=keyboard)
-
-
 # ================= 会员管理子菜单 =================
 async def admin_member_manage_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     """会员管理子菜单"""
     query = update.callback_query
     await query.answer()
@@ -241,10 +251,9 @@ async def admin_member_manage_callback(update: Update, context: ContextTypes.DEF
         [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
     ])
     await query.edit_message_text("💳 会员管理\n\n选择操作：", reply_markup=keyboard)
-
-
 # ================= 套餐管理回调 =================
 async def admin_plans_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
 
@@ -294,6 +303,7 @@ async def admin_plans_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 # ================= 地址管理回调 =================
 async def admin_addresses_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
 
@@ -340,6 +350,7 @@ async def admin_addresses_callback(update: Update, context: ContextTypes.DEFAULT
     )
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     from database import db_execute
@@ -403,7 +414,7 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 display = str(uid)
 
             start_time = datetime.fromisoformat(start)
-            end_time = start_time + timedelta(hours=TRIAL_HOURS)
+            end_time = start_time + timedelta(hours=config.TRIAL_HOURS)
             text += f"• {display}\n  🆔 `{uid}` | 到期 {end_time.strftime('%Y-%m-%d %H:%M')}\n\n"
 
     await query.edit_message_text(
@@ -415,32 +426,38 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def admin_add_trial(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("请回复: /add_trial 用户ID\n例如: /add_trial 123456789", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
 
 async def admin_add_permanent(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("请回复: /add_permanent 用户ID", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
 
 async def admin_extend(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("请回复: /extend 用户ID 天数", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
 
 async def admin_kick(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("请回复: /kick 用户ID [原因]", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
 
 async def admin_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("请回复: /unban 用户ID", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
 
 # 新增：删除会员回调
 async def admin_delete_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     await query.edit_message_text(
@@ -457,6 +474,7 @@ async def admin_delete_member(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def admin_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     from database import db_execute
@@ -468,10 +486,10 @@ async def admin_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "📋 会员列表\n"
     for uid, exp, perm in rows[:20]:
         try:
-            member = await context.bot.get_chat_member(GROUP_ID, uid)
-            name = member.user.full_name
+            user = await context.bot.get_chat(uid)
+            name = user.full_name or user.username or str(uid)
         except:
-            name = "未知"
+            name = str(uid)
         if perm:
             text += f"• {name} ({uid}) - 永久会员\n"
         else:
@@ -480,11 +498,11 @@ async def admin_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
 
 async def admin_trials(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     from database import db_execute
     from datetime import datetime, timedelta
-    from config import TRIAL_HOURS
     rows = db_execute("SELECT user_id, trial_start_time FROM users WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0 AND is_banned=0").fetchall()
     if not rows:
         await query.edit_message_text("暂无试用用户", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
@@ -492,16 +510,17 @@ async def admin_trials(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🧪 试用用户\n"
     for uid, start in rows[:20]:
         start_time = datetime.fromisoformat(start)
-        end_time = start_time + timedelta(hours=TRIAL_HOURS)
+        end_time = start_time + timedelta(hours=config.TRIAL_HOURS)
         try:
-            member = await context.bot.get_chat_member(GROUP_ID, uid)
-            name = member.user.full_name
+            user = await context.bot.get_chat(uid)
+            name = user.full_name or user.username or str(uid)
         except:
-            name = "未知"
+            name = str(uid)
         text += f"• {name} ({uid}) - 到期 {end_time.strftime('%Y-%m-%d %H:%M')}\n"
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]]))
 
 async def admin_banned(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     query = update.callback_query
     await query.answer()
     from database import db_execute
@@ -516,6 +535,7 @@ async def admin_banned(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= 管理员回复用户 =================
 async def admin_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     """管理员回复用户 - 显示最近联系的用户列表"""
     query = update.callback_query
     await query.answer()
@@ -545,7 +565,7 @@ async def admin_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     for row in rows:
         user_id = row[0]
         try:
-            member = await context.bot.get_chat_member(GROUP_ID, user_id)
+            member = await context.bot.get_chat_member(config.GROUP_ID, user_id)
             name = member.user.full_name
         except:
             try:
@@ -564,6 +584,7 @@ async def admin_reply_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 async def admin_reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     """管理员回复用户消息 - 使用命令 /reply"""
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("⛔ 只有管理员可以使用此命令。")
@@ -596,42 +617,89 @@ async def admin_reply_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 # ================= 广播消息功能 =================
 async def admin_broadcast_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """广播消息回调"""
+    config.refresh_config()
+    """广播消息回调 - 进入广播模式"""
     query = update.callback_query
     await query.answer()
 
     context.user_data['broadcast_mode'] = True
+    context.user_data['broadcast_pending'] = None  # 待确认的消息
+
     await query.edit_message_text(
         "📢 **广播消息**\n\n"
-        "请输入要广播的消息内容：\n\n"
-        "⚠️ 此消息将发送给所有用户（包括试用、会员、永久会员）\n"
-        "⚠️ 广播可能需要一些时间，请耐心等待\n\n"
+        "请发送要广播的内容（文字/图片/视频/GIF/文件等）\n\n"
+        "发送后会先预览，确认后再发送给所有用户。\n\n"
         "回复 /cancel 取消广播",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("◀️ 取消", callback_data="back_to_admin_menu")]
         ])
     )
-
 async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """处理广播消息"""
+    config.refresh_config()
+    """处理广播消息 - 先预览再确认"""
     if not is_admin(update.effective_user.id):
         return
 
     if not context.user_data.get('broadcast_mode'):
         return
 
-    if update.message.text == "/cancel":
+    msg = update.message
+
+    # 取消
+    if msg.text and msg.text == "/cancel":
         context.user_data['broadcast_mode'] = False
+        context.user_data['broadcast_pending'] = None
         await update.message.reply_text("✅ 已取消广播")
         return
 
-    broadcast_text = update.message.text
-    user_id = update.effective_user.id
+    # ✅ 第一步：存储消息，发送预览
+    if not context.user_data.get('broadcast_pending'):
+        # 先回复确认
+        await msg.reply_text(
+            "📋 **预览**\n\n"
+            "👆 这是你要广播的内容\n\n"
+            "确认发送给所有用户吗？",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ 确认发送", callback_data="broadcast_confirm")],
+                [InlineKeyboardButton("❌ 取消", callback_data="broadcast_cancel")],
+            ])
+        )
+        # 存储消息引用
+        context.user_data['broadcast_pending'] = {
+            'chat_id': msg.chat_id,
+            'message_id': msg.message_id
+        }
+        return
 
-    await update.message.reply_text("⏳ 正在发送广播消息，请稍候...")
+    # 如果已经有待确认的消息，提醒先处理
+    await msg.reply_text("⚠️ 请先处理上一条广播（确认或取消）")
+async def broadcast_confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    """确认发送广播"""
+    query = update.callback_query
+    await query.answer()
 
-    # 获取所有用户
+    pending = context.user_data.get('broadcast_pending')
+    if not pending:
+        await query.edit_message_text("❌ 没有待发送的广播")
+        return
+
+    await query.edit_message_text("⏳ 正在发送广播...")
+
+    # ✅ 改用 copy_message 获取原始消息
+    try:
+        message_id = await context.bot.copy_message(
+            chat_id=query.message.chat_id,
+            from_chat_id=pending['chat_id'],
+            message_id=pending['message_id']
+        )
+    except:
+        await query.edit_message_text("❌ 无法获取原始消息，请重新发送")
+        context.user_data['broadcast_pending'] = None
+        return
+
     from database import get_all_users_for_broadcast
     users = get_all_users_for_broadcast()
 
@@ -640,35 +708,45 @@ async def handle_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for (uid,) in users:
         try:
-            await context.bot.send_message(
-                uid,
-                f"📢 **系统广播**\n\n{broadcast_text}\n\n"
-                f"——————————\n"
-                f"💡 如需帮助，请发送 /start"
+            # ✅ 直接 copy 消息给用户，保留所有格式
+            await context.bot.copy_message(
+                chat_id=uid,
+                from_chat_id=pending['chat_id'],
+                message_id=pending['message_id']
             )
             success_count += 1
-            await asyncio.sleep(0.05)  # 避免触发频率限制
+            await asyncio.sleep(0.05)
+
         except Exception as e:
             fail_count += 1
-            logging.warning(f"广播给用户 {uid} 失败: {e}")
+            logging.warning(f"广播给 {uid} 失败: {e}")
 
     context.user_data['broadcast_mode'] = False
+    context.user_data['broadcast_pending'] = None
+    log_admin_action(query.from_user.id, f"broadcast: 成功{success_count} 失败{fail_count}")
 
-    # 记录日志
-    log_admin_action(user_id, f"broadcast: {broadcast_text[:50]}...")
+    await query.edit_message_text(f"✅ 广播完成！\n\n成功: {success_count}\n失败: {fail_count}")
+async def broadcast_cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    """取消广播"""
+    query = update.callback_query
+    await query.answer()
 
-    await update.message.reply_text(
-        f"✅ 广播完成！\n\n"
-        f"成功: {success_count} 人\n"
-        f"失败: {fail_count} 人"
+    context.user_data['broadcast_pending'] = None
+
+    await query.edit_message_text(
+        "❌ 已取消广播\n\n可以重新发送内容。",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("◀️ 返回菜单", callback_data="back_to_admin_menu")]
+        ])
     )
 
 # ================= 定时任务 =================
 async def check_expired(context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     """检查试用和会员到期，以及频道关注状态"""
     from datetime import datetime, timedelta
     from database import db_execute, now, get_user_status
-    from config import TRIAL_HOURS, REMIND_HOURS, GROUP_ID, CHANNEL_LINK
     from utils import kick_user
     from database import is_admin as check_admin
     import logging
@@ -688,7 +766,7 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
 
         # 检查用户是否还在群组中
         try:
-            member = await context.bot.get_chat_member(GROUP_ID, uid)
+            member = await context.bot.get_chat_member(config.GROUP_ID, uid)
             if member.status not in ["member", "administrator", "creator"]:
                 # 🔧 关键修复：只有真正无资格的用户才删除
                 if is_valid:
@@ -711,18 +789,19 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
     trials = db_execute("SELECT user_id, trial_start_time, reminded_type FROM users WHERE trial_start_time IS NOT NULL AND expire_time IS NULL AND is_permanent=0 AND is_banned=0").fetchall()
     for uid, start, reminded_type in trials:
         start_time = datetime.fromisoformat(start)
-        end_time = start_time + timedelta(hours=TRIAL_HOURS)
+        end_time = start_time + timedelta(hours=config.TRIAL_HOURS)
 
         if current >= end_time:
             logging.info(f"用户 {uid} 试用到期，准备封禁并踢出")
-            await kick_user(context, uid, "试用到期", ban=True)
-            db_execute("UPDATE users SET trial_start_time=NULL, is_banned=1, reminded_type=NULL WHERE user_id=?", (uid,))
-        elif (end_time - current) <= timedelta(hours=REMIND_HOURS):
+            await kick_user(context, uid, "试用到期", ban=True)  # ← 保持不变
+            # 试用到期
+            db_execute("UPDATE users SET is_banned=1, reminded_type=NULL WHERE user_id=?", (uid,))
+        elif (end_time - current) <= timedelta(hours=config.REMIND_HOURS):
             if reminded_type != 'trial':
                 try:
                     await context.bot.send_message(
                         uid, 
-                        f"⏰ **试用即将到期**\n\n您的试用剩余 {REMIND_HOURS} 小时，请购买会员以继续使用。\n\n发送 /start 查看购买选项。"
+                        f"⏰ **试用即将到期**\n\n您的试用剩余 {config.REMIND_HOURS} 小时，请购买会员以继续使用。\n\n发送 /start 查看购买选项。"
                     )
                     db_execute("UPDATE users SET reminded_type='trial' WHERE user_id=?", (uid,))
                 except:
@@ -735,9 +814,9 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
 
         if current >= expire:
             logging.info(f"用户 {uid} 会员到期，准备封禁并踢出")
-            await kick_user(context, uid, "会员到期", ban=True)
-            db_execute("UPDATE users SET expire_time=NULL, is_banned=1, reminded_type=NULL WHERE user_id=?", (uid,))
-        elif (expire - current) <= timedelta(days=3):
+            await kick_user(context, uid, "会员到期", ban=True)  # ← 保持不变  
+            db_execute("UPDATE users SET is_banned=1, reminded_type=NULL WHERE user_id=?", (uid,))
+        elif (expire - current) <= timedelta(days=config.MEMBER_REMIND_DAYS):
             if reminded_type != 'member':
                 days_left = (expire - current).days
                 try:
@@ -750,12 +829,13 @@ async def check_expired(context: ContextTypes.DEFAULT_TYPE):
                     pass
 
 async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     """管理员查看待处理 USDT 订单 - 添加手动确认按钮"""
     query = update.callback_query
     await query.answer()
 
     from handlers.user import pending_usdt_orders, clean_expired_orders
-    from config import USDT_ORDER_TIMEOUT
+    USDT_ORDER_TIMEOUT = config.USDT_ORDER_TIMEOUT
     import time
 
     clean_expired_orders()
@@ -798,6 +878,7 @@ async def admin_usdt_orders_callback(update: Update, context: ContextTypes.DEFAU
     )
 
 async def admin_confirm_usdt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     """管理员手动确认 USDT 订单 - 添加频道检查"""
     query = update.callback_query
     await query.answer()
@@ -806,7 +887,6 @@ async def admin_confirm_usdt_callback(update: Update, context: ContextTypes.DEFA
 
     from handlers.user import pending_usdt_orders
     from database import extend_member, unban_user, db_execute, now, get_user_status
-    from config import GROUP_ID
 
     if amount_key not in pending_usdt_orders:
         await query.edit_message_text("❌ 订单不存在或已过期")
@@ -824,7 +904,7 @@ async def admin_confirm_usdt_callback(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text(
             f"⚠️ 用户 {user_id} 未关注频道！\n\n"
             f"请先让用户关注频道后再确认订单。\n\n"
-            f"👉 {CHANNEL_LINK}",
+            f"👉 {config.CHANNEL_LINK}",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("◀️ 返回订单列表", callback_data="admin_usdt_orders")]
             ])
@@ -842,9 +922,9 @@ async def admin_confirm_usdt_callback(update: Update, context: ContextTypes.DEFA
 
     # 3. 解封群组中的用户
     try:
-        member = await context.bot.get_chat_member(GROUP_ID, user_id)
+        member = await context.bot.get_chat_member(config.GROUP_ID, user_id)
         if member.status in ["left", "kicked"]:
-            await context.bot.unban_chat_member(GROUP_ID, user_id)
+            await context.bot.unban_chat_member(config.GROUP_ID, user_id)
             logging.info(f"用户 {user_id} 已从群组解封")
     except Exception as e:
         logging.warning(f"解封用户 {user_id} 失败: {e}")
@@ -894,32 +974,107 @@ async def admin_confirm_usdt_callback(update: Update, context: ContextTypes.DEFA
     )
 
 async def admin_usdt_orders_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """管理员查看 USDT 订单历史"""
+    config.refresh_config()
+    """管理员查看 USDT 订单历史 - 支持分类筛选和分页"""
     query = update.callback_query
     await query.answer()
+
+    # 解析回调数据：admin_usdt_orders_history_{filter}_{page}
+    data_parts = query.data.split("_")
+
+    # 默认值
+    order_filter = "all"
+    page = 1
+
+    # admin_usdt_orders_history → all, page 1
+    # admin_usdt_orders_history_paid_2 → paid, page 2
+    if len(data_parts) > 4:
+        order_filter = data_parts[4]
+    if len(data_parts) > 5:
+        try:
+            page = int(data_parts[5])
+        except:
+            page = 1
+
+    per_page = 5  # 每页显示条数
 
     from database import db_execute
     from datetime import datetime
 
-    rows = db_execute("""
+    # ✅ 加在这里，解析完 filter 和 page 之后
+    cache_key = f"{order_filter}_{page}"
+    last_cache = context.user_data.get('last_order_cache', '')
+
+    if cache_key == last_cache:
+        return  # 相同请求直接跳过
+
+    context.user_data['last_order_cache'] = cache_key
+
+    # 构建查询条件
+    filter_map = {
+        "all": "1=1",
+        "pending": "status='pending'",
+        "paid": "status='paid'",
+        "expired": "status IN ('expired', 'cancelled')"
+    }
+    where_clause = filter_map.get(order_filter, "1=1")
+
+    # 查询总数
+    count_row = db_execute(f"SELECT COUNT(*) FROM usdt_orders WHERE {where_clause}").fetchone()
+    total = count_row[0] if count_row else 0
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    if page > total_pages:
+        page = total_pages
+
+    offset = (page - 1) * per_page
+
+    # 查询订单
+    rows = db_execute(f"""
         SELECT order_id, user_id, plan_name, amount, status, created_at, paid_at, tx_id
         FROM usdt_orders 
+        WHERE {where_clause}
         ORDER BY created_at DESC 
-        LIMIT 20
-    """).fetchall()
+        LIMIT ? OFFSET ?
+    """, (per_page, offset)).fetchall()
 
     if not rows:
+        # 空状态
+        filter_names = {"all": "订单", "pending": "待支付订单", "paid": "已支付订单", "expired": "已过期/取消订单"}
         await query.edit_message_text(
-            "📭 暂无订单记录。",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
-            ])
+            f"📭 暂无{filter_names.get(order_filter, '订单')}记录。",
+            reply_markup=_build_history_keyboard(order_filter, page, total_pages)
         )
         return
 
+    # 统计各状态数量
+    stats = db_execute("""
+        SELECT 
+            COUNT(*) as total,
+            SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) as pending,
+            SUM(CASE WHEN status='paid' THEN 1 ELSE 0 END) as paid,
+            SUM(CASE WHEN status IN ('expired','cancelled') THEN 1 ELSE 0 END) as expired
+        FROM usdt_orders
+    """).fetchone()
+
     text = "💎 **USDT 订单历史**\n\n"
-    for row in rows:
-        order_id, user_id, plan_name, amount, status, created_at, paid_at, tx_id = row
+    text += f"📊 全部: {stats[0]} | ⏳待支付: {stats[1]} | ✅已支付: {stats[2]} | ❌已过期: {stats[3]}\n"
+    text += f"━━━━━━━━━━━━\n"
+
+    # 构建订单列表
+    for row_data in rows:
+        order_id, user_id, plan_name, amount, status, created_at, paid_at, tx_id = row_data
+
+        # 获取用户信息
+        try:
+            user = await context.bot.get_chat(user_id)
+            if user.username:
+                user_display = f"{user.full_name} (@{user.username})"
+            else:
+                user_display = f"{user.full_name}"
+            user_display += f"\n  🆔 `{user_id}`"
+        except:
+            user_display = f"🆔 `{user_id}`"
 
         status_map = {
             "pending": ("⏳", "待支付"),
@@ -930,29 +1085,66 @@ async def admin_usdt_orders_history_callback(update: Update, context: ContextTyp
         icon, status_text = status_map.get(status, ("❓", status))
 
         created_time = datetime.fromisoformat(created_at).strftime("%m-%d %H:%M")
-        text += f"{icon} **{plan_name}** - {amount} USDT ({status_text})\n"
-        text += f"   用户: `{user_id}`\n"
-        text += f"   创建: {created_time}\n"
+
+        text += f"{icon} **{plan_name}** - {amount} USDT\n"
+        text += f"  👤 {user_display}\n"
+        text += f"  📅 创建: {created_time}\n"
+
         if status == "paid" and paid_at:
             paid_time = datetime.fromisoformat(paid_at).strftime("%m-%d %H:%M")
-            text += f"   支付: {paid_time}\n"
+            text += f"  💰 支付: {paid_time}\n"
+
         if tx_id and tx_id != 'manual_confirm':
-            text += f"   交易: `{tx_id[:16]}...`\n"
+            text += f"  🔗 交易: `{tx_id[:20]}...`\n"
+        elif tx_id == 'manual_confirm':
+            text += f"  🔗 确认: 手动确认\n"
+
         text += "\n"
+
+    text += f"━━━━━━━━━━━━\n📄 第 {page}/{total_pages} 页"
 
     await query.edit_message_text(
         text,
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 刷新", callback_data="admin_usdt_orders_history")],
-            [InlineKeyboardButton("📊 待处理订单", callback_data="admin_usdt_orders")],
-            [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")]
-        ])
+        reply_markup=_build_history_keyboard(order_filter, page, total_pages)
     )
+def _build_history_keyboard(current_filter: str, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    """构建订单历史页面的键盘"""
+    buttons = []
 
-# admin.py 末尾添加
+    # 筛选按钮
+    filter_buttons = [
+        ("📋 全部", "all"),
+        ("⏳ 待支付", "pending"),
+        ("✅ 已支付", "paid"),
+        ("❌ 已过期", "expired"),
+    ]
+
+    row = []
+    for label, f in filter_buttons:
+        if f == current_filter:
+            row.append(InlineKeyboardButton(f"● {label}", callback_data=f"admin_usdt_orders_history_{f}_1"))
+        else:
+            row.append(InlineKeyboardButton(label, callback_data=f"admin_usdt_orders_history_{f}_1"))
+    buttons.append(row)
+
+    # 翻页按钮
+    nav_row = []
+    if page > 1:
+        nav_row.append(InlineKeyboardButton("◀️ 上一页", callback_data=f"admin_usdt_orders_history_{current_filter}_{page-1}"))
+    if page < total_pages:
+        nav_row.append(InlineKeyboardButton("下一页 ▶️", callback_data=f"admin_usdt_orders_history_{current_filter}_{page+1}"))
+    if nav_row:
+        buttons.append(nav_row)
+
+    # 底部按钮
+    buttons.append([InlineKeyboardButton("📊 待处理订单", callback_data="admin_usdt_orders")])
+    buttons.append([InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")])
+
+    return InlineKeyboardMarkup(buttons)
 
 async def cmd_add_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     args = context.args
@@ -965,6 +1157,7 @@ async def cmd_add_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已添加套餐: {name} - {price} USDT / {days}天")
 
 async def cmd_del_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     if not context.args:
@@ -975,6 +1168,7 @@ async def cmd_del_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已删除套餐: {context.args[0]}")
 
 async def cmd_toggle_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     if not context.args:
@@ -985,6 +1179,7 @@ async def cmd_toggle_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已切换套餐状态: {context.args[0]}")
 
 async def cmd_add_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     if not context.args:
@@ -995,6 +1190,7 @@ async def cmd_add_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ 已添加地址: {context.args[0]}")
 
 async def cmd_del_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
     if not is_admin(update.effective_user.id):
         return
     if not context.args:
@@ -1003,3 +1199,162 @@ async def cmd_del_address(update: Update, context: ContextTypes.DEFAULT_TYPE):
     from database import delete_address
     delete_address(context.args[0])
     await update.message.reply_text(f"✅ 已删除地址: {context.args[0]}")
+
+# ================= 系统设置 =================
+async def admin_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    """系统设置菜单"""
+    query = update.callback_query
+    await query.answer()
+
+    from config import refresh_config, get_group_id, get_channel_id, get_trial_hours, get_remind_hours, get_usdt_order_timeout, get_delete_delay
+
+    refresh_config()
+
+    group_id = get_group_id()
+    channel_id = get_channel_id()
+
+    text = "⚙️ **系统设置**\n\n"
+    text += f"📌 群组ID: `{group_id if group_id else '未设置'}`\n"
+    text += f"🔗 邀请链接: `{config.GROUP_LINK if config.GROUP_LINK else '未设置'}`\n"
+    text += f"📢 频道ID: `{channel_id if channel_id else '未设置'}`\n"
+    text += f"📡 频道链接: `{config.CHANNEL_LINK if config.CHANNEL_LINK else '未设置'}`\n"
+    text += f"⏱ 试用时长: {get_trial_hours()} 小时\n"
+    text += f"🔔 试用到期提醒: 提前 {get_remind_hours()} 小时\n"
+    text += f"📅 会员到期提醒: 提前 {config.MEMBER_REMIND_DAYS} 天\n"
+    text += f"⏰ 订单超时: {get_usdt_order_timeout()} 秒\n"
+    text += f"🗑 消息删除: {get_delete_delay()} 秒\n\n"
+    text += "💡 点击下方按钮修改对应设置："
+
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📌 设置群组ID", callback_data="admin_set_group"),
+         InlineKeyboardButton("🔗 设置群链接", callback_data="admin_set_invite_link")],
+        [InlineKeyboardButton("📢 设置频道ID", callback_data="admin_set_channel"),
+         InlineKeyboardButton("📡 设置频道链接", callback_data="admin_set_channel_link")],
+        [InlineKeyboardButton("⏱ 设置试用时长", callback_data="admin_set_trial"),
+         InlineKeyboardButton("🔔 试用提醒", callback_data="admin_set_remind")],
+        [InlineKeyboardButton("📅 会员提醒", callback_data="admin_set_member_remind")],
+        [InlineKeyboardButton("⏰ 设置订单超时", callback_data="admin_set_timeout"),
+         InlineKeyboardButton("🗑 设置删除延迟", callback_data="admin_set_delete")],
+        [InlineKeyboardButton("🔄 刷新配置", callback_data="admin_settings")],
+        [InlineKeyboardButton("◀️ 返回", callback_data="back_to_admin_menu")],
+    ])
+    
+    try:
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+    except Exception as e:
+        if "not modified" not in str(e):
+            raise
+# ================= 各项设置的回调 =================
+async def admin_set_group_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_group_id'
+    await query.edit_message_text(
+        "📌 请输入新的群组ID（带 -100 前缀）：\n\n"
+        "例如：`-1001234567890`\n\n"
+        "回复 /cancel 取消",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+    
+async def admin_set_invite_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_invite_link'
+    await query.edit_message_text(
+        "🔗 请输入新的群组邀请链接：\n\n"
+        "例如：`https://t.me/+abcdefg12345`\n\n"
+        "回复 /cancel 取消",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+    
+async def admin_set_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_channel_id'
+    await query.edit_message_text(
+        "📢 请输入新的频道ID（带 -100 前缀）：\n\n"
+        "例如：`-1009876543210`\n\n"
+        "回复 /cancel 取消",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+
+async def admin_set_channel_link_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_channel_link'
+    await query.edit_message_text(
+        "📡 请输入新的频道链接：\n\n"
+        "例如：`https://t.me/+xxxxx`\n\n"
+        "回复 /cancel 取消",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+
+async def admin_set_trial_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_trial_hours'
+    await query.edit_message_text(
+        "⏱ 请输入试用时长（小时）：\n\n"
+        "例如：`24` 表示 24 小时\n"
+        "`0.0167` 表示 1 分钟",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+
+async def admin_set_remind_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_remind_hours'
+    await query.edit_message_text(
+        "🔔 请输入提前提醒时间（小时）：\n\n"
+        "例如：`3` 表示提前 3 小时提醒",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+
+async def admin_set_member_remind_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_member_remind'
+    await query.edit_message_text(
+        "📅 请输入会员到期提醒天数：\n\n"
+        "例如：`3` 表示提前 3 天提醒",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+
+async def admin_set_timeout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_order_timeout'
+    await query.edit_message_text(
+        "⏰ 请输入订单超时时间（秒）：\n\n"
+        "例如：`600` 表示 10 分钟",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
+
+async def admin_set_delete_delay_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    config.refresh_config()
+    query = update.callback_query
+    await query.answer()
+    context.user_data['waiting_for'] = 'set_delete_delay'
+    await query.edit_message_text(
+        "🗑 请输入消息自动删除延迟（秒）：\n\n"
+        "例如：`10` 表示 10 秒后删除",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ 返回", callback_data="admin_settings")]])
+    )
