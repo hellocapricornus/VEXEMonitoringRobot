@@ -1,4 +1,4 @@
-# main.py - 修复定时任务和导入问题
+# vip.py - 修复定时任务和导入问题
 
 #!/usr/bin/env python3
 import logging
@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import BOT_TOKEN, ADMIN_ID, CHANNEL_LINK
+from config import BOT_TOKEN, ADMIN_ID
 from utils import is_user_following_channel
 from database import init_db
 from handlers.user import (
@@ -30,7 +30,7 @@ from handlers.user import (
     user_buy_usdt,
     usdt_plan_callback,
     check_usdt_payment_callback,
-    clean_expired_orders,  # 统一从这里导入
+    clean_expired_orders,
 )
 from handlers.admin import (
     cmd_add_trial,
@@ -39,6 +39,8 @@ from handlers.admin import (
     cmd_kick,
     cmd_unban,
     back_to_admin_menu,
+    broadcast_confirm_callback,
+    broadcast_cancel_callback,
     admin_stats,
     admin_add_trial,
     admin_add_permanent,
@@ -57,15 +59,26 @@ from handlers.admin import (
     admin_broadcast_callback,
     handle_broadcast,
     cmd_check_user,
-    cmd_add_plan,           # ✅ 新增
-    cmd_del_plan,           # ✅ 新增
-    cmd_toggle_plan,        # ✅ 新增
-    cmd_add_address,        # ✅ 新增
-    cmd_del_address,        # ✅ 新增
+    cmd_add_plan,
+    cmd_del_plan,
+    cmd_toggle_plan,
+    cmd_add_address,
+    cmd_del_address,
     admin_user_manage_callback,
     admin_member_manage_callback,
     admin_plans_callback,
     admin_addresses_callback,
+    # ✅ 新增系统设置
+    admin_settings_callback,
+    admin_set_group_callback,
+    admin_set_channel_callback,
+    admin_set_trial_callback,
+    admin_set_remind_callback,
+    admin_set_timeout_callback,
+    admin_set_delete_delay_callback,
+    admin_set_invite_link_callback,
+    admin_set_channel_link_callback,
+    admin_set_member_remind_callback,
 )
 from handlers.group import new_member_handler, left_member_handler
 from handlers.join_request import handle_join_request
@@ -75,20 +88,27 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 
-# 🔧 添加分布式锁标记（如果使用多个 worker，需要外部存储如 Redis）
-# 这里使用环境变量标记，单实例部署时安全
+# 🔒 安全：隐藏敏感的 HTTP 请求详情
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+logging.getLogger("telegram.ext.Application").setLevel(logging.WARNING)
+
+# 分布式锁标记
 WORKER_ID = os.environ.get("WORKER_ID", "default")
-SCHEDULER_LOCK_KEY = "scheduler_running"
+
 
 def main():
     # 初始化数据库
     init_db()
 
-    # 🔧 添加：启动时验证数据库完整性
+    # 启动时验证数据库完整性
     from database import db_execute, get_user_status
 
-    # 1. 显示所有付费用户
-    paid_users = db_execute("SELECT user_id, expire_time, is_permanent FROM users WHERE expire_time IS NOT NULL OR is_permanent=1").fetchall()
+    # 显示所有付费用户
+    paid_users = db_execute(
+        "SELECT user_id, expire_time, is_permanent FROM users WHERE expire_time IS NOT NULL OR is_permanent=1"
+    ).fetchall()
     logging.info(f"=== 启动时数据库状态 ===")
     logging.info(f"付费用户总数: {len(paid_users)}")
 
@@ -96,22 +116,15 @@ def main():
         user_id = user[0]
         expire_time = user[1]
         is_permanent = user[2]
-
-        # 验证每个付费用户的状态
         is_valid, status = get_user_status(user_id)
         logging.info(f"用户 {user_id}: 永久={is_permanent}, 到期={expire_time}, 有效={is_valid}, 状态={status}")
 
-        # 🔧 如果有资格但不在群组，不删除，只记录
-        if is_valid:
-            logging.info(f"✅ 用户 {user_id} 有有效会员资格，已保留")
-
-    # 2. 检查数据库文件位置
-    import os
-    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.db")
+    # 🔧 修复：数据库文件路径
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vip.db")
     logging.info(f"数据库文件位置: {db_path}")
     logging.info(f"数据库文件存在: {os.path.exists(db_path)}")
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app = ApplicationBuilder().token(BOT_TOKEN).concurrent_updates(True).build()
 
     # ================= 命令 =================
     app.add_handler(CommandHandler("start", start))
@@ -122,31 +135,28 @@ def main():
     app.add_handler(CommandHandler("unban", cmd_unban))
     app.add_handler(CommandHandler("reply", admin_reply_command))
     app.add_handler(CommandHandler("check_user", cmd_check_user))
-    # ✅ 套餐和地址管理
     app.add_handler(CommandHandler("addplan", cmd_add_plan))
     app.add_handler(CommandHandler("delplan", cmd_del_plan))
     app.add_handler(CommandHandler("toggleplan", cmd_toggle_plan))
     app.add_handler(CommandHandler("addaddr", cmd_add_address))
     app.add_handler(CommandHandler("deladdr", cmd_del_address))
-
+    app.add_handler(CallbackQueryHandler(broadcast_confirm_callback, pattern="^broadcast_confirm$"))
+    app.add_handler(CallbackQueryHandler(broadcast_cancel_callback, pattern="^broadcast_cancel$"))
     
 
-    # ================= 消息处理器 - 调整优先级 =================
-    # 1. 广播消息处理器（最高优先级，group=1）
+    # ================= 消息处理器 =================
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE,
+        ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE,
         handle_broadcast
     ), group=1)
 
-    # 2. 管理员回复处理器（中等优先级，group=2）
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE, 
+        filters.TEXT & ~filters.COMMAND & filters.Chat(chat_id=ADMIN_ID) & filters.ChatType.PRIVATE,
         handle_admin_reply
     ), group=2)
 
-    # 3. 用户消息处理器（最低优先级，group=3）
     app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & ~filters.Chat(chat_id=ADMIN_ID), 
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE & ~filters.Chat(chat_id=ADMIN_ID),
         handle_user_message
     ), group=3)
 
@@ -158,20 +168,15 @@ def main():
     app.add_handler(ChatJoinRequestHandler(handle_join_request))
 
     # ================= 回调 =================
-    # 用户回调
     app.add_handler(CallbackQueryHandler(check_follow_callback, pattern="^check_follow$"))
     app.add_handler(CallbackQueryHandler(user_query_time, pattern="^user_query$"))
     app.add_handler(CallbackQueryHandler(back_to_user_menu, pattern="^back_to_user_menu$"))
     app.add_handler(CallbackQueryHandler(restart_callback, pattern="^restart$"))
     app.add_handler(CallbackQueryHandler(contact_admin_callback, pattern="^contact_admin$"))
     app.add_handler(CallbackQueryHandler(reply_user_callback, pattern="^reply_user_"))
-
-    # 用户回调 - USDT 支付
     app.add_handler(CallbackQueryHandler(user_buy_usdt, pattern="^user_buy_usdt$"))
     app.add_handler(CallbackQueryHandler(usdt_plan_callback, pattern="^usdt_plan_"))
     app.add_handler(CallbackQueryHandler(check_usdt_payment_callback, pattern="^check_usdt_"))
-
-    # 管理员回调
     app.add_handler(CallbackQueryHandler(back_to_admin_menu, pattern="^back_to_admin_menu$"))
     app.add_handler(CallbackQueryHandler(admin_stats, pattern="^admin_stats$"))
     app.add_handler(CallbackQueryHandler(admin_add_trial, pattern="^admin_add_trial$"))
@@ -184,133 +189,155 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_banned, pattern="^admin_banned$"))
     app.add_handler(CallbackQueryHandler(admin_reply_callback, pattern="^admin_reply$"))
     app.add_handler(CallbackQueryHandler(admin_usdt_orders_callback, pattern="^admin_usdt_orders$"))
-    app.add_handler(CallbackQueryHandler(admin_usdt_orders_history_callback, pattern="^admin_usdt_orders_history$"))
+    app.add_handler(CallbackQueryHandler(admin_usdt_orders_history_callback, pattern="^admin_usdt_orders_history"))
     app.add_handler(CallbackQueryHandler(admin_confirm_usdt_callback, pattern="^admin_confirm_usdt_"))
     app.add_handler(CallbackQueryHandler(admin_broadcast_callback, pattern="^admin_broadcast$"))
-    # 新增子菜单回调
     app.add_handler(CallbackQueryHandler(admin_user_manage_callback, pattern="^admin_user_manage$"))
     app.add_handler(CallbackQueryHandler(admin_member_manage_callback, pattern="^admin_member_manage$"))
     app.add_handler(CallbackQueryHandler(admin_plans_callback, pattern="^admin_plans$"))
     app.add_handler(CallbackQueryHandler(admin_addresses_callback, pattern="^admin_addresses$"))
+    # 系统设置
+    app.add_handler(CallbackQueryHandler(admin_settings_callback, pattern="^admin_settings$"))
+    app.add_handler(CallbackQueryHandler(admin_set_group_callback, pattern="^admin_set_group$"))
+    app.add_handler(CallbackQueryHandler(admin_set_channel_callback, pattern="^admin_set_channel$"))
+    app.add_handler(CallbackQueryHandler(admin_set_trial_callback, pattern="^admin_set_trial$"))
+    app.add_handler(CallbackQueryHandler(admin_set_remind_callback, pattern="^admin_set_remind$"))
+    app.add_handler(CallbackQueryHandler(admin_set_timeout_callback, pattern="^admin_set_timeout$"))
+    app.add_handler(CallbackQueryHandler(admin_set_delete_delay_callback, pattern="^admin_set_delete$"))
+    app.add_handler(CallbackQueryHandler(admin_set_invite_link_callback, pattern="^admin_set_invite_link$"))
+    app.add_handler(CallbackQueryHandler(admin_set_channel_link_callback, pattern="^admin_set_channel_link$"))
+    app.add_handler(CallbackQueryHandler(admin_set_member_remind_callback, pattern="^admin_set_member_remind$"))
 
     # ================= 定时任务 =================
     if app.job_queue:
-        # 🔧 使用环境变量判断是否启用定时任务（避免多 worker 重复）
         enable_scheduler = os.environ.get("ENABLE_SCHEDULER", "true").lower() == "true"
 
+        # 初始化分布式锁表
+        from scheduler_lock import init_scheduler_locks_table
+        init_scheduler_locks_table()
+
         if enable_scheduler:
-            # 原有的任务
-            app.job_queue.run_repeating(check_expired, interval=30, first=5)
-
-            async def check_all_group_members(context):
-                """检查数据库中所有用户的频道关注状态"""
-                from config import GROUP_ID, CHANNEL_ID
-                from database import is_admin as db_is_admin, db_execute
-                from utils import kick_user, is_user_following_channel
-
-                logging.info("开始检查所有用户的频道关注状态...")
-
+            # ✅ 使用带锁的检查任务
+            async def check_expired_with_lock(context):
+                from scheduler_lock import SchedulerLock
+                lock = SchedulerLock("check_expired", timeout=120)
+                if not lock.acquire():
+                    logging.info(f"Worker {WORKER_ID}: 锁已被占用，跳过检查")
+                    return
                 try:
-                    # 从数据库获取所有未被封禁的用户
-                    rows = db_execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+                    await check_expired(context)
+                finally:
+                    lock.release()
 
-                    checked = 0
-                    kicked = 0
-                    for (user_id,) in rows:
-                        if user_id == context.bot.id or db_is_admin(user_id):
-                            continue
+            async def check_all_group_members_with_lock(context):
+                from scheduler_lock import SchedulerLock
+                lock = SchedulerLock("check_all_members", timeout=600)
+                if not lock.acquire():
+                    logging.info(f"Worker {WORKER_ID}: 全量检查锁已被占用，跳过")
+                    return
+                try:
+                    await _check_all_group_members(context)
+                finally:
+                    lock.release()
 
-                        # 先检查用户是否在群组中
-                        try:
-                            member = await context.bot.get_chat_member(GROUP_ID, user_id)
-                            if member.status not in ["member", "administrator", "creator"]:
-                                continue  # 不在群组，跳过
-                        except:
-                            continue  # 无法获取状态，跳过
+            async def clean_database_with_lock(context):
+                from scheduler_lock import SchedulerLock
+                lock = SchedulerLock("clean_database", timeout=300)
+                if not lock.acquire():
+                    logging.info(f"Worker {WORKER_ID}: 清理锁已被占用，跳过")
+                    return
+                try:
+                    await _clean_database_job(context)
+                finally:
+                    lock.release()
 
-                        checked += 1
-                        is_following = await is_user_following_channel(context, user_id)
+            app.job_queue.run_repeating(check_expired_with_lock, interval=30, first=5)
+            app.job_queue.run_repeating(check_all_group_members_with_lock, interval=1800, first=60)
+            app.job_queue.run_repeating(clean_database_with_lock, interval=300, first=15)
+            app.job_queue.run_daily(clean_database_with_lock, time=dt.time(hour=3, minute=0), days=tuple(range(7)))
 
-                        if not is_following:
-                            db_execute("UPDATE users SET needs_channel_check=1 WHERE user_id=?", (user_id,))
-
-                            try:
-                                await context.bot.ban_chat_member(GROUP_ID, user_id)
-                                await context.bot.unban_chat_member(GROUP_ID, user_id)
-                                kicked += 1
-                                logging.info(f"用户 {user_id} 未关注频道，已移除")
-
-                                try:
-                                    await context.bot.send_message(
-                                        user_id,
-                                        f"⚠️ 你被移出了群组，因为你没有关注我们的频道。\n\n"
-                                        f"请关注频道后重新申请加入。\n\n"
-                                        f"👉 {CHANNEL_LINK}"
-                                    )
-                                except:
-                                    pass
-                            except Exception as e:
-                                logging.warning(f"踢出用户 {user_id} 失败: {e}")
-
-                        await asyncio.sleep(0.05)  # 避免频率限制
-
-                    logging.info(f"用户频道检查完成：已检查 {checked} 人，移除 {kicked} 人")
-
-                except Exception as e:
-                    logging.error(f"检查用户频道失败: {e}")
-
-            app.job_queue.run_repeating(check_all_group_members, interval=1800, first=60)
-
-            # 新增：每天凌晨3点清理旧订单
-            from database import clean_old_orders, update_expired_pending_orders
-
-            async def clean_database_job(context):
-                """定时清理数据库任务 - 包含释放过期地址"""
-                import logging
-                from database import db_execute, mark_address_idle, update_expired_pending_orders, clean_old_orders
-
-                logging.info(f"Worker {WORKER_ID}: 开始执行数据库清理任务...")
-
-                # 1. 先将超时的待处理订单转为过期
-                updated = update_expired_pending_orders()
-                logging.info(f"已将 {updated} 个超时订单转为过期")
-
-                # 2. 释放过期/取消订单占用的地址
-                expired_with_address = db_execute("""
-                    SELECT DISTINCT address FROM usdt_orders 
-                    WHERE status IN ('expired', 'cancelled') AND address IS NOT NULL AND address != ''
-                """).fetchall()
-
-                released = 0
-                for (address,) in expired_with_address:
-                    # 检查这个地址是否还有其他 pending 订单在用
-                    still_in_use = db_execute("""
-                        SELECT COUNT(*) FROM usdt_orders 
-                        WHERE address = ? AND status = 'pending'
-                    """, (address,)).fetchone()[0]
-
-                    if still_in_use == 0:
-                        mark_address_idle(address)
-                        released += 1
-                        logging.info(f"释放地址: {address}")
-
-                if released > 0:
-                    logging.info(f"已释放 {released} 个过期订单地址")
-
-                # 3. 清理旧订单
-                deleted = clean_old_orders()
-                logging.info(f"数据库清理完成，共删除 {deleted} 条记录")
-
-            # ✅ 注册定时任务（每5分钟检查一次释放地址，每天凌晨3点清理旧订单）
-            app.job_queue.run_repeating(clean_database_job, interval=300, first=15)
-            app.job_queue.run_daily(clean_database_job, time=dt.time(hour=3, minute=0), days=tuple(range(7)))
-
-    # 启动时恢复待处理订单（只恢复内存，不检查支付）
-    from handlers.user import restore_orders_on_startup, check_all_pending_orders_on_startup
+    # 启动时恢复待处理订单
+    from handlers.user import restore_orders_on_startup
     restore_orders_on_startup()
 
     logging.info(f"机器人启动 (Worker: {WORKER_ID})，使用 polling 模式")
     app.run_polling()
+
+
+# ================= 提取的定时任务辅助函数 =================
+async def _check_all_group_members(context):
+    """检查数据库中所有用户的频道关注状态，并记录群内用户"""
+    import config
+    from database import is_admin as db_is_admin, db_execute, get_user, add_trial
+    from utils import is_user_following_channel
+
+    logging.info("开始全量检查群成员...")
+    try:
+        # 🔧 无法直接获取所有成员，改为从数据库获取所有未封禁用户
+        rows = db_execute("SELECT user_id FROM users WHERE is_banned=0").fetchall()
+
+        checked = 0
+        kicked = 0
+        new_in_group = 0
+
+        for (user_id,) in rows:
+            if user_id == context.bot.id or db_is_admin(user_id):
+                continue
+
+            # 检查用户是否在群组中
+            try:
+                member = await context.bot.get_chat_member(config.GROUP_ID, user_id)
+
+                # 不在群组中，跳过
+                if member.status not in ["member", "administrator", "creator"]:
+                    continue
+
+                # 跳过管理员
+                if member.status in ["administrator", "creator"]:
+                    continue
+            except Exception as e:
+                # 无法获取状态，可能不在群组
+                continue
+
+            checked += 1
+
+            # 检查频道关注
+            is_following = await is_user_following_channel(context, user_id)
+
+            if not is_following:
+                db_execute("UPDATE users SET needs_channel_check=1 WHERE user_id=?", (user_id,))
+                try:
+                    await context.bot.ban_chat_member(config.GROUP_ID, user_id)
+                    await context.bot.unban_chat_member(config.GROUP_ID, user_id)
+                    kicked += 1
+                    logging.info(f"用户 {user_id} 未关注频道，已移除")
+                    try:
+                        await context.bot.send_message(
+                            user_id,
+                            f"⚠️ 你被移出了群组，因为你没有关注我们的频道。\n\n"
+                            f"请关注频道后重新申请加入。\n\n👉 {config.CHANNEL_LINK}"
+                        )
+                    except:
+                        pass
+                except Exception as e:
+                    logging.warning(f"踢出用户 {user_id} 失败: {e}")
+
+            await asyncio.sleep(0.05)
+
+        logging.info(f"全量检查完成：已检查 {checked} 人，移除 {kicked} 人")
+
+    except Exception as e:
+        logging.error(f"全量检查失败: {e}")
+
+async def _clean_database_job(context):
+    """定时清理数据库任务"""
+    from database import db_execute, mark_address_idle, update_expired_pending_orders, clean_old_orders
+    logging.info(f"Worker {WORKER_ID}: 开始执行数据库清理任务...")
+    updated = update_expired_pending_orders()
+    logging.info(f"已将 {updated} 个超时订单转为过期并释放地址")
+    deleted = clean_old_orders()
+    logging.info(f"数据库清理完成，共删除 {deleted} 条记录")
+
 
 if __name__ == "__main__":
     main()
